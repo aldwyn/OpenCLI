@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, AuthRequiredError, CommandExecutionError } from '@jackwener/opencli/errors';
 const LINKEDIN_DOMAIN = 'linkedin.com';
@@ -94,6 +95,19 @@ function decodeLinkedinRedirect(url) {
     }
     catch { }
     return url;
+}
+function generateReferralSearchId() {
+    return randomBytes(16).toString('base64');
+}
+function buildJobSearchUrl(input) {
+    const searchParams = new URLSearchParams();
+    searchParams.set('keywords', input.keywords);
+    if (input.location) {
+        searchParams.set('location', input.location);
+    }
+    searchParams.set('origin', 'JOB_SEARCH_PAGE_JOB_FILTER');
+    searchParams.set('referralSearchId', input.referralSearchId || generateReferralSearchId());
+    return `https://www.linkedin.com/jobs/search-results/?${searchParams.toString()}`;
 }
 function buildVoyagerSearchQuery(input) {
     const hasFilters = input.companyIds.length ||
@@ -422,10 +436,8 @@ cli({
         const keywords = String(kwargs.query ?? '').trim();
         if (!keywords)
             throw new ArgumentError('query is required');
-        const searchParams = new URLSearchParams({ keywords });
-        if (location)
-            searchParams.set('location', location);
-        await page.goto(`https://www.linkedin.com/jobs/search/?${searchParams.toString()}`);
+        const searchUrl = buildJobSearchUrl({ keywords, location });
+        await page.goto(searchUrl);
         await assertLinkedInAuthenticated(page, 'LinkedIn search');
         await page.wait({ text: 'Jobs', timeout: 10 });
         const companyIds = await resolveCompanyIds(page, kwargs.company);
@@ -455,6 +467,8 @@ export const __test__ = {
     looksLinkedInAuthWallText,
     assertLinkedInAuthenticated,
     enrichJobDetails,
+    generateReferralSearchId,
+    buildJobSearchUrl,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,

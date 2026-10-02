@@ -10,6 +10,8 @@ const {
     decodeLinkedinRedirect,
     looksLinkedInAuthWallText,
     enrichJobDetails,
+    generateReferralSearchId,
+    buildJobSearchUrl,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,
@@ -220,3 +222,63 @@ describe('linkedin enrichJobDetails (silent failure fix)', () => {
         ])).rejects.toBeInstanceOf(AuthRequiredError);
     });
 });
+
+describe('linkedin search URL builder (semantic search)', () => {
+    it('generates a valid base64 referralSearchId', () => {
+        const id = generateReferralSearchId();
+        expect(id).toMatch(/^[A-Za-z0-9+/]{22}==$/);
+        const buffer = Buffer.from(id, 'base64');
+        expect(buffer.length).toBe(16);
+    });
+
+    it('builds semantic search URL matching the required elements', () => {
+        const url = buildJobSearchUrl({
+            keywords: "senior aws devops fully remote jobs in Australia that doesn't need to be based in Australia contract or full-time or part-time posted in the past week",
+            referralSearchId: 'uzo1ol6xZOlWpgHn0cy4Vw==',
+        });
+        expect(url).toBe(
+            'https://www.linkedin.com/jobs/search-results/?keywords=senior+aws+devops+fully+remote+jobs+in+Australia+that+doesn%27t+need+to+be+based+in+Australia+contract+or+full-time+or+part-time+posted+in+the+past+week&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=uzo1ol6xZOlWpgHn0cy4Vw%3D%3D'
+        );
+    });
+
+    it('includes location when provided', () => {
+        const url = buildJobSearchUrl({
+            keywords: 'aws devops',
+            location: 'Australia',
+            referralSearchId: 'uzo1ol6xZOlWpgHn0cy4Vw==',
+        });
+        expect(url).toBe(
+            'https://www.linkedin.com/jobs/search-results/?keywords=aws+devops&location=Australia&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=uzo1ol6xZOlWpgHn0cy4Vw%3D%3D'
+        );
+    });
+
+    it('generates a fresh referralSearchId if none is provided', () => {
+        const url = buildJobSearchUrl({ keywords: 'software engineer' });
+        expect(url).toMatch(/^https:\/\/www\.linkedin\.com\/jobs\/search-results\/\?keywords=software\+engineer&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=[A-Za-z0-9%]+$/);
+    });
+
+    it('navigates browser to semantic search URL on execution', async () => {
+        const command = getSearchCommand();
+        let navigatedUrl = '';
+        const page = {
+            goto: vi.fn().mockImplementation(async (url) => { navigatedUrl = url; }),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn().mockResolvedValue(false),
+        };
+
+        try {
+            await command.func(page, { query: 'aws devops', location: 'Australia', limit: 1 });
+        } catch {
+            // Further API calls in mock page may throw after navigation
+        }
+
+        expect(page.goto).toHaveBeenCalledTimes(1);
+        expect(navigatedUrl).toContain('https://www.linkedin.com/jobs/search-results/?');
+        expect(navigatedUrl).toContain('keywords=aws+devops');
+        expect(navigatedUrl).toContain('location=Australia');
+        expect(navigatedUrl).toContain('origin=JOB_SEARCH_PAGE_JOB_FILTER');
+        expect(navigatedUrl).toContain('referralSearchId=');
+        expect(navigatedUrl).not.toContain('/jobs/search/?');
+    });
+});
+
