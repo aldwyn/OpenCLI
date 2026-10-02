@@ -254,44 +254,155 @@ async function resolveCompanyIds(page, input) {
     }
     return [...ids];
 }
+// ── DOM extraction fallback (for semantic search & streaming cards) ───
+async function extractJobCardsFromDom(page) {
+    try {
+        await page.wait({
+            selector: '[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container',
+            timeout: 5,
+        }).catch(() => {});
+    } catch { }
+
+    const rawJobs = await page.evaluate(`(() => {
+        const selector = [
+            '[componentkey^="job-card-component-ref-"]',
+            '[data-occludable-job-id]',
+            '[data-job-id]',
+            'div.job-card-container',
+            'li.jobs-search-results__list-item'
+        ].join(', ');
+        const cards = Array.from(document.querySelectorAll(selector));
+        return cards.map(card => {
+            const componentKey = card.getAttribute('componentkey') || '';
+            const keyMatch = componentKey.match(/job-card-component-ref-(\\d+)/);
+            const dataJobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id');
+            const link = card.querySelector('a[href*="/jobs/view/"]');
+            const linkMatch = (link?.getAttribute('href') || '').match(/\\/jobs\\/view\\/(\\d+)/);
+            const jobId = keyMatch?.[1] || dataJobId || linkMatch?.[1] || '';
+            const canonicalUrl = jobId ? ('https://www.linkedin.com/jobs/view/' + jobId) : (link?.href ? link.href.split('?')[0] : '');
+
+            const paragraphs = Array.from(card.querySelectorAll('p')).map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean);
+
+            let title = '';
+            const titleSpan = card.querySelector('p span.b4la5p') || 
+                              card.querySelector('a.job-card-list__title') || 
+                              card.querySelector('.job-card-list__title') ||
+                              card.querySelector('p span');
+            if (titleSpan) {
+                title = (titleSpan.innerText || titleSpan.textContent || '').replace(/\\(Verified job\\)/gi, '').trim();
+            }
+            if (!title && paragraphs[0]) {
+                title = paragraphs[0].replace(/\\(Verified job\\)/gi, '').trim();
+            }
+            title = title.split('\\n')[0].trim();
+
+            const companyEl = card.querySelector('.job-card-container__primary-description') || 
+                              card.querySelector('div[class*="b4llzp"] p') ||
+                              card.querySelector('.job-card-container__company-name');
+            const company = (companyEl?.innerText || companyEl?.textContent || paragraphs[1] || '').split('\\n')[0].trim();
+
+            const locationEl = card.querySelector('.job-card-container__metadata-item') || 
+                               card.querySelector('p[class*="b4llzp"]');
+            const location = (locationEl?.innerText || locationEl?.textContent || paragraphs[2] || '').split('\\n')[0].trim();
+
+            let listed = '';
+            const timeEl = card.querySelector('time');
+            if (timeEl) {
+                listed = (timeEl.getAttribute('datetime') || timeEl.innerText || timeEl.textContent || '').trim();
+            }
+            if (!listed) {
+                const listedSpan = Array.from(card.querySelectorAll('span, time, p')).find(el => {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    return /posted\\s+\\d+/i.test(t) || /^\\d+\\s+(?:hours?|days?|weeks?|months?)\\s+ago$/i.test(t);
+                });
+                if (listedSpan) {
+                    listed = (listedSpan.innerText || listedSpan.textContent || '').trim();
+                } else {
+                    const allText = (card.innerText || card.textContent || '').replace(/\\s+/g, ' ');
+                    const match = allText.match(/(?:posted\\s+)?\\b(\\d+\\s+(?:hours?|days?|weeks?|months?)\\s+ago)\\b/i);
+                    if (match) listed = match[0].trim();
+                }
+            }
+            listed = listed.split('\\n')[0].trim();
+
+            const allText = (card.innerText || card.textContent || '').replace(/\\s+/g, ' ');
+            const salaryMatch = allText.match(/(\\$\\d[\\d,.]*\\s*k?\\b[^·]+|\\d+k\\s*[A-Z]{3}\\/yr\\s*-\\s*\\d+k\\s*[A-Z]{3}\\/yr)/i);
+            const salary = salaryMatch ? salaryMatch[0].split('\\n')[0].trim() : '';
+
+            return {
+                title,
+                company,
+                location,
+                listed,
+                salary,
+                url: canonicalUrl
+            };
+        }).filter(j => j.title && j.url);
+    })()`);
+
+    if (!Array.isArray(rawJobs)) return [];
+
+    const seen = new Set();
+    const unique = [];
+    for (const job of rawJobs) {
+        if (!seen.has(job.url)) {
+            seen.add(job.url);
+            unique.push(job);
+        }
+    }
+    return unique;
+}
+
 // ── Voyager API fetch (runs inside page context for cookie access) ────
 async function fetchJobCards(page, input) {
     const MAX_BATCH = 25;
     const allJobs = [];
     let offset = input.start;
     // Read JSESSIONID directly from the cookie store via CDP — zero page.evaluate round-trip
-    const cookies = await page.getCookies({ url: 'https://www.linkedin.com' });
-    const jsession = cookies.find((c) => c.name === 'JSESSIONID')?.value;
+    const cookies = await page.getCookies?.({ url: 'https://www.linkedin.com' });
+    const jsession = cookies?.find((c) => c.name === 'JSESSIONID')?.value;
     if (!jsession) {
+        const domJobs = await extractJobCardsFromDom(page);
+        if (domJobs.length > 0) {
+            return domJobs.slice(input.start, input.start + input.limit).map((item, index) => ({
+                rank: input.start + index + 1,
+                ...item,
+            }));
+        }
         throw new AuthRequiredError(LINKEDIN_DOMAIN, 'LinkedIn JSESSIONID cookie not found. Please sign in to LinkedIn in the browser.');
     }
     const csrf = jsession.replace(/^"|"$/g, '');
     while (allJobs.length < input.limit) {
         const count = Math.min(MAX_BATCH, input.limit - allJobs.length);
         const apiPath = buildVoyagerUrl(input, offset, count);
-        const batch = await page.evaluate(`(async () => {
-      const res = await fetch(${JSON.stringify(apiPath)}, {
-        credentials: 'include',
-        headers: { 'csrf-token': ${JSON.stringify(csrf)}, 'x-restli-protocol-version': '2.0.0' },
-      });
-      if (res.status === 401 || res.status === 403) {
-        const text = await res.text();
-        return {
-          authRequired: true,
-          error: 'LinkedIn API authentication failed: HTTP ' + res.status + ' ' + text.slice(0, 200)
-        };
-      }
-      if (!res.ok) {
-        const text = await res.text();
-        return { error: 'LinkedIn API error: HTTP ' + res.status + ' ' + text.slice(0, 200) };
-      }
-      return res.json();
-    })()`);
+        let batch;
+        try {
+            batch = await page.evaluate(`(async () => {
+          const res = await fetch(${JSON.stringify(apiPath)}, {
+            credentials: 'include',
+            headers: { 'csrf-token': ${JSON.stringify(csrf)}, 'x-restli-protocol-version': '2.0.0' },
+          });
+          if (res.status === 401 || res.status === 403) {
+            const text = await res.text();
+            return {
+              authRequired: true,
+              error: 'LinkedIn API authentication failed: HTTP ' + res.status + ' ' + text.slice(0, 200)
+            };
+          }
+          if (!res.ok) {
+            const text = await res.text();
+            return { error: 'LinkedIn API error: HTTP ' + res.status + ' ' + text.slice(0, 200) };
+          }
+          return res.json();
+        })()`);
+        } catch {
+            break;
+        }
         if (!batch || batch.error) {
             if (batch?.authRequired) {
                 throw new AuthRequiredError(LINKEDIN_DOMAIN, batch.error);
             }
-            throw new CommandExecutionError(batch?.error || 'LinkedIn search returned an unexpected response');
+            break;
         }
         const elements = Array.isArray(batch?.elements) ? batch.elements : [];
         if (elements.length === 0)
@@ -321,6 +432,17 @@ async function fetchJobCards(page, input) {
             break;
         offset += elements.length;
     }
+
+    if (allJobs.length === 0) {
+        const domJobs = await extractJobCardsFromDom(page);
+        if (domJobs.length > 0) {
+            return domJobs.slice(input.start, input.start + input.limit).map((item, index) => ({
+                rank: input.start + index + 1,
+                ...item,
+            }));
+        }
+    }
+
     return allJobs.slice(0, input.limit).map((item, index) => ({
         rank: input.start + index + 1,
         ...item,
@@ -469,6 +591,8 @@ export const __test__ = {
     enrichJobDetails,
     generateReferralSearchId,
     buildJobSearchUrl,
+    extractJobCardsFromDom,
+    fetchJobCards,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,

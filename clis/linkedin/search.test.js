@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { JSDOM } from 'jsdom';
 import { getRegistry } from '@jackwener/opencli/registry';
 import { ArgumentError, AuthRequiredError } from '@jackwener/opencli/errors';
 import { __test__ } from './search.js';
@@ -12,6 +13,8 @@ const {
     enrichJobDetails,
     generateReferralSearchId,
     buildJobSearchUrl,
+    extractJobCardsFromDom,
+    fetchJobCards,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,
@@ -281,4 +284,191 @@ describe('linkedin search URL builder (semantic search)', () => {
         expect(navigatedUrl).not.toContain('/jobs/search/?');
     });
 });
+
+describe('linkedin extractJobCardsFromDom', () => {
+    it('extracts jobs correctly from semantic search DOM elements', async () => {
+        const html = `
+            <div componentkey="job-card-component-ref-4375836267">
+                <p><span class="b4la5p">Senior Cloud Engineer - AWS</span> (Verified job)</p>
+                <div class="b4llzp"><p>Talenza</p></div>
+                <p class="b4llzp">Sydney, NSW (Remote)</p>
+                <span>Posted 3 days ago</span>
+                <div>$160k AUD/yr - $175k AUD/yr</div>
+            </div>
+            <div componentkey="job-card-component-ref-4375359734">
+                <p><span>Senior DevOps Engineer</span></p>
+                <div class="b4llzp"><p>Humanify Tech</p></div>
+                <p class="b4llzp">Australia (Remote)</p>
+                <span>Posted 4 days ago</span>
+            </div>
+        `;
+        const dom = new JSDOM(html);
+        const page = {
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const jobs = await extractJobCardsFromDom(page);
+        expect(jobs).toHaveLength(2);
+        expect(jobs[0]).toEqual({
+            title: 'Senior Cloud Engineer - AWS',
+            company: 'Talenza',
+            location: 'Sydney, NSW (Remote)',
+            listed: 'Posted 3 days ago',
+            salary: '$160k AUD/yr - $175k AUD/yr',
+            url: 'https://www.linkedin.com/jobs/view/4375836267',
+        });
+        expect(jobs[1]).toEqual({
+            title: 'Senior DevOps Engineer',
+            company: 'Humanify Tech',
+            location: 'Australia (Remote)',
+            listed: 'Posted 4 days ago',
+            salary: '',
+            url: 'https://www.linkedin.com/jobs/view/4375359734',
+        });
+    });
+
+    it('deduplicates duplicate cards in the DOM', async () => {
+        const html = `
+            <div componentkey="job-card-component-ref-111">
+                <p><span class="b4la5p">Engineer</span></p>
+                <div class="b4llzp"><p>Company A</p></div>
+                <p class="b4llzp">Remote</p>
+            </div>
+            <div componentkey="job-card-component-ref-111">
+                <p><span class="b4la5p">Engineer</span></p>
+                <div class="b4llzp"><p>Company A</p></div>
+                <p class="b4llzp">Remote</p>
+            </div>
+        `;
+        const dom = new JSDOM(html);
+        const page = {
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const jobs = await extractJobCardsFromDom(page);
+        expect(jobs).toHaveLength(1);
+    });
+
+    it('extracts jobs with classic selector fallback', async () => {
+        const html = `
+            <div class="job-card-container" data-job-id="222">
+                <a class="job-card-list__title" href="/jobs/view/222">Classic Engineer</a>
+                <div class="job-card-container__company-name">Classic Corp</div>
+                <div class="job-card-container__metadata-item">Melbourne, VIC</div>
+                <time datetime="2026-10-01">2026-10-01</time>
+            </div>
+        `;
+        const dom = new JSDOM(html);
+        const page = {
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const jobs = await extractJobCardsFromDom(page);
+        expect(jobs).toHaveLength(1);
+        expect(jobs[0]).toMatchObject({
+            title: 'Classic Engineer',
+            company: 'Classic Corp',
+            location: 'Melbourne, VIC',
+            listed: '2026-10-01',
+            url: 'https://www.linkedin.com/jobs/view/222',
+        });
+    });
+});
+
+describe('linkedin fetchJobCards fallback to DOM', () => {
+    it('falls back to DOM extraction when Voyager API returns empty elements', async () => {
+        const dom = new JSDOM(`
+            <div componentkey="job-card-component-ref-999">
+                <p><span class="b4la5p">Semantic DevOps</span></p>
+                <div class="b4llzp"><p>Cloud Corp</p></div>
+                <p class="b4llzp">Australia (Remote)</p>
+                <span>Posted 2 days ago</span>
+            </div>
+        `);
+        const page = {
+            getCookies: vi.fn().mockResolvedValue([{ name: 'JSESSIONID', value: '"ajax:12345"' }]),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn()
+                .mockResolvedValueOnce({ elements: [] })
+                .mockImplementation(async (code) => {
+                    const fn = new Function('document', 'window', `return ${code}`);
+                    return fn(dom.window.document, dom.window);
+                }),
+        };
+
+        const input = {
+            keywords: 'aws devops',
+            location: 'Australia',
+            limit: 10,
+            start: 0,
+            companyIds: [],
+            experienceLevels: [],
+            jobTypes: [],
+            datePostedValues: [],
+            remoteTypes: [],
+        };
+
+        const jobs = await fetchJobCards(page, input);
+        expect(jobs).toHaveLength(1);
+        expect(jobs[0]).toEqual({
+            rank: 1,
+            title: 'Semantic DevOps',
+            company: 'Cloud Corp',
+            location: 'Australia (Remote)',
+            listed: 'Posted 2 days ago',
+            salary: '',
+            url: 'https://www.linkedin.com/jobs/view/999',
+        });
+    });
+
+    it('returns Voyager API results when available without invoking DOM extraction', async () => {
+        const page = {
+            getCookies: vi.fn().mockResolvedValue([{ name: 'JSESSIONID', value: '"ajax:12345"' }]),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn().mockResolvedValueOnce({
+                elements: [{
+                    jobCardUnion: {
+                        jobPostingCard: {
+                            jobPostingUrn: 'urn:li:fsd_jobPosting:888',
+                            jobPostingTitle: 'Voyager DevOps',
+                            primaryDescription: { text: 'Voyager Corp' },
+                            secondaryDescription: { text: 'Sydney, NSW' },
+                            footerItems: [{ type: 'LISTED_DATE', timeAt: 1700000000000 }],
+                        },
+                    },
+                }],
+            }),
+        };
+
+        const input = {
+            keywords: 'aws devops',
+            location: 'Australia',
+            limit: 5,
+            start: 0,
+            companyIds: [],
+            experienceLevels: [],
+            jobTypes: [],
+            datePostedValues: [],
+            remoteTypes: [],
+        };
+
+        const jobs = await fetchJobCards(page, input);
+        expect(jobs).toHaveLength(1);
+        expect(jobs[0].title).toBe('Voyager DevOps');
+        expect(jobs[0].url).toBe('https://www.linkedin.com/jobs/view/888');
+    });
+});
+
 
