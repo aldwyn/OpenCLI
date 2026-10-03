@@ -651,7 +651,22 @@ async function clickJobCardInDom(page, job) {
 
         if (!card) return false;
 
-        const clickable = card.querySelector('a[href*="/jobs/view/"], a.job-card-list__title, a') || card;
+        // Ensure card is the container element and not an anchor tag
+        while (card && (card.tagName.toLowerCase() === 'a' || card.closest('a'))) {
+            card = card.parentElement;
+        }
+        if (!card) return false;
+
+        // Choose a non-hyperlink element in the card: either the card container itself,
+        // or a non-link element inside it (such as the container div or info area),
+        // strictly avoiding any <a> tags so the browser does not navigate or open a new tab.
+        let clickable = card;
+        const nonLinkCandidates = Array.from(card.querySelectorAll('div, p, span'));
+        const nonLinkEl = nonLinkCandidates.find(el => !el.closest('a'));
+        if (nonLinkEl) {
+            clickable = nonLinkEl;
+        }
+
         try { card.scrollIntoView({ behavior: 'auto', block: 'nearest' }); } catch {}
         try { clickable.focus?.(); } catch {}
         try { clickable.click(); } catch {}

@@ -747,10 +747,13 @@ describe('linkedin enrichJobDetails with hiring_team', () => {
 });
 
 describe('linkedin in-page job card clicking and details extraction', () => {
-    it('clicks the job entry card in the DOM and extracts right-side details without calling page.goto', async () => {
+    it('clicks the non-hyperlink part of the job entry card in the DOM and extracts right-side details without calling page.goto or clicking the title link', async () => {
         const dom = new JSDOM(`
-            <div componentkey="job-card-component-ref-4375836267">
+            <div componentkey="job-card-component-ref-4375836267" class="job-card-container">
                 <a class="job-card-list__title" href="/jobs/view/4375836267">Senior Cloud Engineer - AWS</a>
+                <div class="job-card-body">
+                    <p class="company-name">Talenza</p>
+                </div>
             </div>
             <div class="jobs-search__job-details--container">
                 <h2>About the job</h2>
@@ -762,9 +765,16 @@ describe('linkedin in-page job card clicking and details extraction', () => {
                 </div>
             </div>
         `);
-        const clickedEvents = [];
+        let linkClicked = false;
+        let cardNonLinkClicked = false;
+        const card = dom.window.document.querySelector('.job-card-container');
         const cardLink = dom.window.document.querySelector('a.job-card-list__title');
-        cardLink.addEventListener('click', () => clickedEvents.push('card-clicked'));
+        cardLink.addEventListener('click', () => { linkClicked = true; });
+        card.addEventListener('click', (e) => {
+            if (!e.target.closest('a')) {
+                cardNonLinkClicked = true;
+            }
+        });
 
         const page = {
             goto: vi.fn().mockResolvedValue(undefined),
@@ -785,7 +795,8 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         ]);
 
         expect(page.goto).not.toHaveBeenCalled();
-        expect(clickedEvents).toContain('card-clicked');
+        expect(cardNonLinkClicked).toBe(true);
+        expect(linkClicked).toBe(false);
         expect(enriched.description).toContain('Senior AWS Cloud Engineer');
         expect(enriched.apply_url).toBe('https://example.com/apply/aws-cloud');
         expect(enriched.hiring_team).toMatchObject({
