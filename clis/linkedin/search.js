@@ -528,7 +528,8 @@ async function fetchJobCards(page, input) {
     }
     const csrf = jsession.replace(/^"|"$/g, '');
     while (allJobs.length < input.limit) {
-        const count = Math.min(MAX_BATCH, input.limit - allJobs.length);
+        const remaining = input.limit - allJobs.length;
+        const count = remaining > MAX_BATCH ? MAX_BATCH : remaining;
         const apiPath = buildVoyagerUrl(input, offset, count);
         let batch;
         try {
@@ -607,10 +608,119 @@ async function fetchJobCards(page, input) {
 // both produced indistinguishable `description: '', apply_url: ''` payloads,
 // so users could not tell "fetch failed" from "upstream had no description".
 //
-// The fix: surface `null` instead of `''` for missing/failed rows, set
-// `detail_error` to a short reason ("no url" / "fetch failed: <message>" /
-// "missing description"), and log every failure to stderr with the offending
-// URL so debugging is possible. Successful rows have `detail_error: null`.
+// To extract details efficiently without opening new tabs or navigating away,
+// `enrichJobDetails` clicks each job card in the current search page DOM
+// so LinkedIn loads the details into the right-side pane. If the card cannot
+// be found on the current page or in-page loading fails to yield a description,
+// it gracefully falls back to `page.goto(job.url)`.
+
+async function clickJobCardInDom(page, job) {
+    const jobId = String(job.url || '').match(/\/jobs\/view\/(\d+)/)?.[1] || '';
+    const clicked = await page.evaluate(`((targetJobId, targetUrl, targetTitle) => {
+        const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const cleanTitle = norm(targetTitle);
+        let card = null;
+
+        if (targetJobId) {
+            const el = document.querySelector(
+                '[componentkey*="' + targetJobId + '"], ' +
+                '[data-job-id="' + targetJobId + '"], ' +
+                '[data-occludable-job-id="' + targetJobId + '"], ' +
+                'a[href*="/jobs/view/' + targetJobId + '"]'
+            );
+            if (el) {
+                card = el.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item') || el;
+            }
+        }
+
+        if (!card && targetUrl) {
+            const cleanUrl = targetUrl.split('?')[0];
+            const links = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
+            const link = links.find(a => (a.href || '').split('?')[0] === cleanUrl);
+            if (link) {
+                card = link.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item') || link;
+            }
+        }
+
+        if (!card && cleanTitle) {
+            const cardCandidates = Array.from(document.querySelectorAll(
+                '[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], div.job-card-container, li.jobs-search-results__list-item'
+            ));
+            card = cardCandidates.find(c => norm(c.textContent || '').includes(cleanTitle)) || null;
+        }
+
+        if (!card) return false;
+
+        const clickable = card.querySelector('a[href*="/jobs/view/"], a.job-card-list__title, a') || card;
+        try { card.scrollIntoView({ behavior: 'auto', block: 'nearest' }); } catch {}
+        try { clickable.focus?.(); } catch {}
+        try { clickable.click(); } catch {}
+        try {
+            const opts = { bubbles: true, cancelable: true, view: window };
+            clickable.dispatchEvent(new MouseEvent('mousedown', opts));
+            clickable.dispatchEvent(new MouseEvent('mouseup', opts));
+            clickable.dispatchEvent(new MouseEvent('click', opts));
+        } catch {}
+
+        return true;
+    })(${JSON.stringify(jobId)}, ${JSON.stringify(job.url || '')}, ${JSON.stringify(job.title || '')})`);
+
+    return Boolean(clicked);
+}
+
+async function extractJobDetailsFromDom(page) {
+    // Expand "Show more" button if present
+    await page.evaluate(`(() => {
+        const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const rightPane = document.querySelector(
+            '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"]'
+        ) || document;
+        const scope = rightPane && rightPane !== document
+            ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
+            : Array.from(document.querySelectorAll('div, section, article, main'));
+        const section = scope
+          .find(el => norm(el.querySelector('h1,h2,h3,h4, [class*="heading"], strong')?.textContent || '') === 'about the job');
+        const btn = [...(section?.querySelectorAll('button, a[role="button"]') || [])]
+          .find(el => /more/.test(norm(el.textContent || '')) || /more/.test(norm(el.getAttribute('aria-label') || '')));
+        if (btn) btn.click();
+    })()`);
+
+    await page.wait(0.5);
+
+    const detail = await page.evaluate(`(() => {
+        const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim();
+        const rightPane = document.querySelector(
+            '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"]'
+        ) || document;
+
+        const scope = rightPane && rightPane !== document
+            ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
+            : Array.from(document.querySelectorAll('div, section, article, main'));
+
+        const candidates = scope
+          .map(el => ({
+            heading: norm(el.querySelector('h1,h2,h3,h4, [class*="heading"], strong')?.textContent || ''),
+            text: norm(el.innerText || el.textContent || ''),
+          }))
+          .filter(c => c.text && c.heading.toLowerCase() === 'about the job' && c.text.length > 'About the job'.length)
+          .sort((a, b) => a.text.length - b.text.length);
+
+        let description = candidates[0]?.text.replace(/^About the job\\s*/i, '') || '';
+        description = description.replace(/Meet the hiring team[\\s\\S]*$/i, '').trim();
+
+        const applyLink = [...rightPane.querySelectorAll('a[href]')]
+          .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
+          .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
+
+        ${parseHiringTeamDom.toString()}
+        const hiringTeam = parseHiringTeamDom(rightPane) || parseHiringTeamDom(document);
+
+        return { description, applyUrl: applyLink?.href || '', hiringTeam };
+    })()`);
+
+    return detail;
+}
+
 async function enrichJobDetails(page, jobs) {
     const enriched = [];
     for (let i = 0; i < jobs.length; i++) {
@@ -623,48 +733,32 @@ async function enrichJobDetails(page, jobs) {
             continue;
         }
         try {
-            await page.goto(job.url);
-            await assertLinkedInAuthenticated(page, 'LinkedIn job detail');
-            await page.wait({ text: 'About the job', timeout: 8 });
-            // Expand "Show more" button if present
-            await page.evaluate(`(() => {
-        const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const section = [...document.querySelectorAll('div, section, article')]
-          .find(el => norm(el.querySelector('h1,h2,h3,h4')?.textContent || '') === 'about the job');
-        const btn = [...(section?.querySelectorAll('button, a[role="button"]') || [])]
-          .find(el => /more/.test(norm(el.textContent || '')) || /more/.test(norm(el.getAttribute('aria-label') || '')));
-        if (btn) btn.click();
-      })()`);
-            await page.wait(1);
-            // Extract description, apply URL, and hiring team
-            const detail = await page.evaluate(`(() => {
-        const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim();
-        // Find the most specific (shortest) container with "About the job" heading
-        // Shortest = most specific DOM node, avoiding outer wrappers that include unrelated text
-        const candidates = [...document.querySelectorAll('div, section, article')]
-          .map(el => ({
-            heading: norm(el.querySelector('h1,h2,h3,h4')?.textContent || ''),
-            text: norm(el.innerText || ''),
-          }))
-          .filter(c => c.text && c.heading.toLowerCase() === 'about the job' && c.text.length > 'About the job'.length)
-          .sort((a, b) => a.text.length - b.text.length);
+            let detail = null;
+            let clicked = false;
+            try {
+                clicked = await clickJobCardInDom(page, job);
+            } catch {
+                clicked = false;
+            }
 
-        const description = candidates[0]?.text.replace(/^About the job\\s*/i, '') || '';
-        const applyLink = [...document.querySelectorAll('a[href]')]
-          .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
-          .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
+            if (clicked) {
+                await page.wait(0.5);
+                await page.wait({ text: 'About the job', timeout: 3 }).catch(() => {});
+                detail = await extractJobDetailsFromDom(page);
+            }
 
-        ${parseHiringTeamDom.toString()}
-        const hiringTeam = parseHiringTeamDom(document);
+            // Fallback: If card was not in current DOM or click didn't yield a description, navigate directly to job.url
+            if (!detail || !detail.description) {
+                await page.goto(job.url);
+                await assertLinkedInAuthenticated(page, 'LinkedIn job detail');
+                await page.wait({ text: 'About the job', timeout: 8 }).catch(() => {});
+                detail = await extractJobDetailsFromDom(page);
+            }
 
-        return { description, applyUrl: applyLink?.href || '', hiringTeam };
-      })()`);
             const description = normalizeWhitespace(detail?.description);
             const apply_url = decodeLinkedinRedirect(String(detail?.applyUrl ?? ''));
             const hiring_team = formatHiringTeam(detail?.hiringTeam);
-            // Empty description after a successful fetch is itself a
-            // recognizable signal — surface it via detail_error instead of
-            // silently emitting an empty string.
+
             const detail_error = description ? null : 'missing description';
             enriched.push({
                 ...job,
@@ -754,6 +848,8 @@ export const __test__ = {
     fetchJobCards,
     formatHiringTeam,
     parseHiringTeamDom,
+    clickJobCardInDom,
+    extractJobDetailsFromDom,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,

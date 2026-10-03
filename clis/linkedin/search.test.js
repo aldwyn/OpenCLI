@@ -18,6 +18,8 @@ const {
     fetchJobCards,
     formatHiringTeam,
     parseHiringTeamDom,
+    clickJobCardInDom,
+    extractJobDetailsFromDom,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,
@@ -127,7 +129,10 @@ describe('linkedin enrichJobDetails (silent failure fix)', () => {
                 }
             }),
             wait: vi.fn(async () => undefined),
-            evaluate: vi.fn(async () => {
+            evaluate: vi.fn(async (code) => {
+                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('clickJobCard'))) {
+                    return false;
+                }
                 const idx = evalCall++;
                 if (evaluateFails[idx]) throw new Error(evaluateFails[idx]);
                 return evaluateResults[idx];
@@ -682,23 +687,35 @@ describe('linkedin hiring team extraction ("Meet the hiring team")', () => {
 });
 
 describe('linkedin enrichJobDetails with hiring_team', () => {
-    it('populates hiring_team when job detail page contains hiring team', async () => {
-        const page = {
+    function makeDetailFakePage(detail) {
+        return {
             goto: vi.fn().mockResolvedValue(undefined),
             wait: vi.fn().mockResolvedValue(undefined),
-            evaluate: vi.fn()
-                .mockResolvedValueOnce(false) // auth wall probe
-                .mockResolvedValueOnce(undefined) // show more button
-                .mockResolvedValueOnce({
-                    description: 'Great job description',
-                    applyUrl: 'https://example.com/apply',
-                    hiringTeam: {
-                        name: 'Emma Watson',
-                        title: 'Technical Recruiter',
-                        profile_url: 'https://www.linkedin.com/in/emma-watson',
-                    },
-                }),
+            evaluate: vi.fn(async (code) => {
+                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('clickJobCard'))) {
+                    return false;
+                }
+                if (typeof code === 'string' && code.includes('login__form')) {
+                    return false;
+                }
+                if (typeof code === 'string' && code.includes('About the job')) {
+                    return detail;
+                }
+                return undefined;
+            }),
         };
+    }
+
+    it('populates hiring_team when job detail page contains hiring team', async () => {
+        const page = makeDetailFakePage({
+            description: 'Great job description',
+            applyUrl: 'https://example.com/apply',
+            hiringTeam: {
+                name: 'Emma Watson',
+                title: 'Technical Recruiter',
+                profile_url: 'https://www.linkedin.com/in/emma-watson',
+            },
+        });
 
         const [enriched] = await enrichJobDetails(page, [
             { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
@@ -715,24 +732,109 @@ describe('linkedin enrichJobDetails with hiring_team', () => {
     });
 
     it('sets hiring_team: null when detail page does not have hiring team', async () => {
-        const page = {
-            goto: vi.fn().mockResolvedValue(undefined),
-            wait: vi.fn().mockResolvedValue(undefined),
-            evaluate: vi.fn()
-                .mockResolvedValueOnce(false)
-                .mockResolvedValueOnce(undefined)
-                .mockResolvedValueOnce({
-                    description: 'Great job description',
-                    applyUrl: '',
-                    hiringTeam: null,
-                }),
-        };
+        const page = makeDetailFakePage({
+            description: 'Great job description',
+            applyUrl: '',
+            hiringTeam: null,
+        });
 
         const [enriched] = await enrichJobDetails(page, [
             { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
         ]);
 
         expect(enriched.hiring_team).toBeNull();
+    });
+});
+
+describe('linkedin in-page job card clicking and details extraction', () => {
+    it('clicks the job entry card in the DOM and extracts right-side details without calling page.goto', async () => {
+        const dom = new JSDOM(`
+            <div componentkey="job-card-component-ref-4375836267">
+                <a class="job-card-list__title" href="/jobs/view/4375836267">Senior Cloud Engineer - AWS</a>
+            </div>
+            <div class="jobs-search__job-details--container">
+                <h2>About the job</h2>
+                <p>We are seeking a Senior AWS Cloud Engineer with deep Terraform and Kubernetes experience.</p>
+                <a href="https://example.com/apply/aws-cloud">Apply externally</a>
+                <div role="alert" title="Meet the hiring team">
+                    <a href="https://www.linkedin.com/in/sarah-recruiter">Sarah Recruiter</a>
+                    <div class="hirer-headline">Talent Partner @ CloudCo</div>
+                </div>
+            </div>
+        `);
+        const clickedEvents = [];
+        const cardLink = dom.window.document.querySelector('a.job-card-list__title');
+        cardLink.addEventListener('click', () => clickedEvents.push('card-clicked'));
+
+        const page = {
+            goto: vi.fn().mockResolvedValue(undefined),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const [enriched] = await enrichJobDetails(page, [
+            {
+                rank: 1,
+                title: 'Senior Cloud Engineer - AWS',
+                company: 'Talenza',
+                url: 'https://www.linkedin.com/jobs/view/4375836267',
+            },
+        ]);
+
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(clickedEvents).toContain('card-clicked');
+        expect(enriched.description).toContain('Senior AWS Cloud Engineer');
+        expect(enriched.apply_url).toBe('https://example.com/apply/aws-cloud');
+        expect(enriched.hiring_team).toMatchObject({
+            name: 'Sarah Recruiter',
+            title: 'Talent Partner @ CloudCo',
+            profile_url: 'https://www.linkedin.com/in/sarah-recruiter',
+        });
+        expect(enriched.detail_error).toBeNull();
+    });
+
+    it('falls back to page.goto when job card is not present in the search page DOM', async () => {
+        const dom = new JSDOM(`
+            <div class="job-details-page">
+                <h2>About the job</h2>
+                <p>Fallback job description via page navigation.</p>
+                <a href="https://example.com/apply/fallback">Apply</a>
+            </div>
+        `);
+        const page = {
+            goto: vi.fn().mockResolvedValue(undefined),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                if (typeof code === 'string' && code.includes('targetJobId')) {
+                    // Card not in DOM
+                    return false;
+                }
+                if (typeof code === 'string' && code.includes('login__form')) {
+                    // Auth probe
+                    return false;
+                }
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const [enriched] = await enrichJobDetails(page, [
+            {
+                rank: 1,
+                title: 'Remote DevOps Engineer',
+                company: 'RemoteCo',
+                url: 'https://www.linkedin.com/jobs/view/888888',
+            },
+        ]);
+
+        expect(page.goto).toHaveBeenCalledTimes(1);
+        expect(page.goto).toHaveBeenCalledWith('https://www.linkedin.com/jobs/view/888888');
+        expect(enriched.description).toContain('Fallback job description via page navigation.');
+        expect(enriched.apply_url).toBe('https://example.com/apply/fallback');
+        expect(enriched.detail_error).toBeNull();
     });
 });
 
