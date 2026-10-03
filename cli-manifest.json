@@ -24081,7 +24081,7 @@
         "type": "bool",
         "default": false,
         "required": false,
-        "help": "Include full job description and apply URL (slower)"
+        "help": "Include full job description, apply URL, and hiring team (slower)"
       },
       {
         "name": "company",

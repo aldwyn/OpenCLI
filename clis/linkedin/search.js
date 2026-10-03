@@ -107,6 +107,10 @@ function buildJobSearchUrl(input) {
     }
     searchParams.set('origin', 'JOB_SEARCH_PAGE_JOB_FILTER');
     searchParams.set('referralSearchId', input.referralSearchId || generateReferralSearchId());
+    const startNum = Number(input.start);
+    if (Number.isFinite(startNum) && startNum > 0) {
+        searchParams.set('start', String(startNum));
+    }
     return `https://www.linkedin.com/jobs/search-results/?${searchParams.toString()}`;
 }
 function buildVoyagerSearchQuery(input) {
@@ -254,6 +258,106 @@ async function resolveCompanyIds(page, input) {
     }
     return [...ids];
 }
+function formatHiringTeam(raw) {
+    if (!raw) return null;
+    const name = normalizeWhitespace(raw.name);
+    const title = normalizeWhitespace(raw.title);
+    const decodedUrl = decodeLinkedinRedirect(normalizeWhitespace(raw.profile_url));
+    const profile_url = decodedUrl ? decodedUrl.split('?')[0].split('#')[0] : '';
+    if (!name && !profile_url) return null;
+    const team = {};
+    team.name = name || null;
+    team.title = title || null;
+    team.profile_url = profile_url || null;
+    team.toString = function() {
+        if (this.name && this.title) return `${this.name} (${this.title})`;
+        return this.name || this.profile_url || '';
+    };
+    return team;
+}
+
+function parseHiringTeamDom(root) {
+    if (!root) return null;
+    const clean = (s) => String(s || '').replace(/[\u00a0\u202f]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const isHiringTeamTitle = (str) => /meet the hiring team/i.test(clean(str));
+
+    let container = root.querySelector?.('[title*="Meet the hiring team" i], [aria-label*="Meet the hiring team" i], [role="alert"][title*="Meet the hiring team" i]');
+
+    if (!container) {
+        const candidates = Array.from(root.querySelectorAll?.('h1, h2, h3, h4, h5, div, section, p, span') || [])
+            .filter(el => isHiringTeamTitle(el.getAttribute('title') || '') ||
+                          isHiringTeamTitle(el.getAttribute('aria-label') || '') ||
+                          (isHiringTeamTitle(el.innerText || el.textContent || '') && clean(el.innerText || el.textContent || '').length < 60));
+
+        for (const cand of candidates) {
+            const parent = cand.closest?.('[role="alert"], section, div.artdeco-card, div');
+            if (parent && parent.querySelector?.('a[href*="/in/"]')) {
+                container = parent;
+                break;
+            }
+            if (cand.parentElement && cand.parentElement.querySelector?.('a[href*="/in/"]')) {
+                container = cand.parentElement;
+                break;
+            }
+        }
+    }
+
+    if (!container) {
+        const allWithLink = Array.from(root.querySelectorAll?.('section, div, [role="alert"]') || [])
+            .filter(el => isHiringTeamTitle(el.innerText || el.textContent || '') && el.querySelector?.('a[href*="/in/"]'));
+        if (allWithLink.length > 0) {
+            allWithLink.sort((a, b) => clean(a.innerText || a.textContent || '').length - clean(b.innerText || b.textContent || '').length);
+            container = allWithLink[0];
+        }
+    }
+
+    if (!container) return null;
+
+    const profileLink = container.querySelector?.('a[href*="/in/"]');
+    if (!profileLink) return null;
+
+    let profileUrl = profileLink.href || profileLink.getAttribute('href') || '';
+    if (profileUrl && !profileUrl.startsWith('http')) {
+        const origin = (typeof window !== 'undefined' && window.location?.origin) ? window.location.origin : 'https://www.linkedin.com';
+        try {
+            profileUrl = new URL(profileUrl, origin).toString();
+        } catch {
+            profileUrl = 'https://www.linkedin.com' + (profileUrl.startsWith('/') ? '' : '/') + profileUrl;
+        }
+    }
+    profileUrl = profileUrl.split('?')[0].split('#')[0];
+
+    let name = clean(profileLink.innerText || profileLink.textContent || '');
+    if (!name) {
+        const nameEl = container.querySelector?.('strong, h3, h4, [class*="name"]');
+        name = clean(nameEl?.innerText || nameEl?.textContent || '');
+    }
+    name = name.replace(/\s*·\s*(?:1st|2nd|3rd\+?|you)\s*$/i, '')
+               .replace(/\s*\((?:he\/him|she\/her|they\/them)\)/i, '')
+               .trim();
+
+    const headlineEl = container.querySelector?.('[class*="headline"], [class*="subtitle"], [class*="occupation"], [class*="description"]');
+    let title = headlineEl ? clean(headlineEl.innerText || headlineEl.textContent || '') : '';
+    if (!title || isHiringTeamTitle(title) || title === name) {
+        const textNodes = Array.from(container.querySelectorAll?.('div, p, span') || [])
+            .map(el => clean(el.innerText || el.textContent || ''))
+            .filter(t => t &&
+                         !isHiringTeamTitle(t) &&
+                         t !== name &&
+                         !t.startsWith(name) &&
+                         !/^(?:1st|2nd|3rd\+?|connect|message|follow|job poster|hiring team)$/i.test(t));
+        title = textNodes[0] || '';
+    }
+
+    if (!name && !profileUrl) return null;
+
+    const team = {};
+    team.name = name || null;
+    team.title = title || null;
+    team.profile_url = profileUrl || null;
+    return team;
+}
+
 // ── DOM extraction fallback (for semantic search & streaming cards) ───
 async function extractJobCardsFromDom(page) {
     try {
@@ -335,7 +439,7 @@ async function extractJobCardsFromDom(page) {
                 location,
                 listed,
                 salary,
-                url: canonicalUrl
+                url: canonicalUrl,
             };
         }).filter(j => j.title && j.url);
     })()`);
@@ -353,6 +457,64 @@ async function extractJobCardsFromDom(page) {
     return unique;
 }
 
+// ── DOM extraction with cursor / offset pagination ────────────────────
+async function fetchJobCardsFromDom(page, input) {
+    const PAGE_SIZE = 25;
+    const allJobs = [];
+    const seenUrls = new Set();
+    let currentStart = input.start;
+    const referralSearchId = input.referralSearchId || generateReferralSearchId();
+    let pagesFetched = 0;
+    const maxPages = Math.ceil(input.limit / PAGE_SIZE) + 2;
+
+    while (allJobs.length < input.limit && pagesFetched < maxPages) {
+        if (pagesFetched > 0) {
+            const targetUrl = buildJobSearchUrl({
+                keywords: input.keywords,
+                location: input.location,
+                start: currentStart,
+                referralSearchId,
+            });
+            await page.goto(targetUrl);
+            await assertLinkedInAuthenticated(page, 'LinkedIn search');
+            await page.wait({ text: 'Jobs', timeout: 10 });
+        }
+        pagesFetched++;
+
+        const pageJobs = await extractJobCardsFromDom(page);
+        if (!pageJobs || pageJobs.length === 0) {
+            break;
+        }
+
+        let newJobsAdded = 0;
+        for (const job of pageJobs) {
+            if (!seenUrls.has(job.url)) {
+                seenUrls.add(job.url);
+                allJobs.push(job);
+                newJobsAdded++;
+                if (allJobs.length >= input.limit) {
+                    break;
+                }
+            }
+        }
+
+        if (newJobsAdded === 0 || allJobs.length >= input.limit) {
+            break;
+        }
+
+        if (pageJobs.length < PAGE_SIZE) {
+            break;
+        }
+
+        currentStart += pageJobs.length;
+    }
+
+    return allJobs.slice(0, input.limit).map((item, index) => ({
+        rank: input.start + index + 1,
+        ...item,
+    }));
+}
+
 // ── Voyager API fetch (runs inside page context for cookie access) ────
 async function fetchJobCards(page, input) {
     const MAX_BATCH = 25;
@@ -362,14 +524,7 @@ async function fetchJobCards(page, input) {
     const cookies = await page.getCookies?.({ url: 'https://www.linkedin.com' });
     const jsession = cookies?.find((c) => c.name === 'JSESSIONID')?.value;
     if (!jsession) {
-        const domJobs = await extractJobCardsFromDom(page);
-        if (domJobs.length > 0) {
-            return domJobs.slice(input.start, input.start + input.limit).map((item, index) => ({
-                rank: input.start + index + 1,
-                ...item,
-            }));
-        }
-        throw new AuthRequiredError(LINKEDIN_DOMAIN, 'LinkedIn JSESSIONID cookie not found. Please sign in to LinkedIn in the browser.');
+        return await fetchJobCardsFromDom(page, input);
     }
     const csrf = jsession.replace(/^"|"$/g, '');
     while (allJobs.length < input.limit) {
@@ -427,6 +582,8 @@ async function fetchJobCards(page, input) {
                 salary: card.tertiaryDescription?.text || '',
                 url: jobId ? 'https://www.linkedin.com/jobs/view/' + jobId : '',
             });
+            if (allJobs.length >= input.limit)
+                break;
         }
         if (elements.length < count)
             break;
@@ -434,13 +591,7 @@ async function fetchJobCards(page, input) {
     }
 
     if (allJobs.length === 0) {
-        const domJobs = await extractJobCardsFromDom(page);
-        if (domJobs.length > 0) {
-            return domJobs.slice(input.start, input.start + input.limit).map((item, index) => ({
-                rank: input.start + index + 1,
-                ...item,
-            }));
-        }
+        return await fetchJobCardsFromDom(page, input);
     }
 
     return allJobs.slice(0, input.limit).map((item, index) => ({
@@ -468,7 +619,7 @@ async function enrichJobDetails(page, jobs) {
         if (!job.url) {
             const reason = 'no url';
             console.error(`[opencli:linkedin] Skipping detail for "${job.title}": ${reason}`);
-            enriched.push({ ...job, description: null, apply_url: null, detail_error: reason });
+            enriched.push({ ...job, description: null, apply_url: null, hiring_team: null, detail_error: reason });
             continue;
         }
         try {
@@ -485,7 +636,7 @@ async function enrichJobDetails(page, jobs) {
         if (btn) btn.click();
       })()`);
             await page.wait(1);
-            // Extract description and apply URL
+            // Extract description, apply URL, and hiring team
             const detail = await page.evaluate(`(() => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim();
         // Find the most specific (shortest) container with "About the job" heading
@@ -503,10 +654,14 @@ async function enrichJobDetails(page, jobs) {
           .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
           .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
 
-        return { description, applyUrl: applyLink?.href || '' };
+        ${parseHiringTeamDom.toString()}
+        const hiringTeam = parseHiringTeamDom(document);
+
+        return { description, applyUrl: applyLink?.href || '', hiringTeam };
       })()`);
             const description = normalizeWhitespace(detail?.description);
             const apply_url = decodeLinkedinRedirect(String(detail?.applyUrl ?? ''));
+            const hiring_team = formatHiringTeam(detail?.hiringTeam);
             // Empty description after a successful fetch is itself a
             // recognizable signal — surface it via detail_error instead of
             // silently emitting an empty string.
@@ -515,6 +670,7 @@ async function enrichJobDetails(page, jobs) {
                 ...job,
                 description: description || null,
                 apply_url: apply_url || null,
+                hiring_team,
                 detail_error,
             });
         }
@@ -523,7 +679,7 @@ async function enrichJobDetails(page, jobs) {
                 throw err;
             const reason = `fetch failed: ${err?.message || err}`;
             console.error(`[opencli:linkedin] Detail fetch failed for ${job.url}: ${reason}`);
-            enriched.push({ ...job, description: null, apply_url: null, detail_error: reason });
+            enriched.push({ ...job, description: null, apply_url: null, hiring_team: null, detail_error: reason });
         }
     }
     return enriched;
@@ -542,7 +698,7 @@ cli({
         { name: 'location', type: 'string', required: false, help: 'Location text such as San Francisco Bay Area' },
         { name: 'limit', type: 'int', default: 10, help: 'Number of jobs to return (max 100)' },
         { name: 'start', type: 'int', default: 0, help: 'Result offset for pagination' },
-        { name: 'details', type: 'bool', default: false, help: 'Include full job description and apply URL (slower)' },
+        { name: 'details', type: 'bool', default: false, help: 'Include full job description, apply URL, and hiring team (slower)' },
         { name: 'company', type: 'string', required: false, help: 'Comma-separated company names or LinkedIn company IDs' },
         { name: 'experience-level', type: 'string', required: false, help: 'Comma-separated: internship, entry, associate, mid-senior, director, executive' },
         { name: 'job-type', type: 'string', required: false, help: 'Comma-separated: full-time, part-time, contract, temporary, volunteer, internship, other' },
@@ -558,7 +714,8 @@ cli({
         const keywords = String(kwargs.query ?? '').trim();
         if (!keywords)
             throw new ArgumentError('query is required');
-        const searchUrl = buildJobSearchUrl({ keywords, location });
+        const referralSearchId = generateReferralSearchId();
+        const searchUrl = buildJobSearchUrl({ keywords, location, start, referralSearchId });
         await page.goto(searchUrl);
         await assertLinkedInAuthenticated(page, 'LinkedIn search');
         await page.wait({ text: 'Jobs', timeout: 10 });
@@ -568,6 +725,7 @@ cli({
             location,
             limit,
             start,
+            referralSearchId,
             companyIds,
             experienceLevels: mapFilterValues(kwargs['experience-level'], EXPERIENCE_LEVELS, 'experience_level'),
             jobTypes: mapFilterValues(kwargs['job-type'], JOB_TYPES, 'job_type'),
@@ -592,7 +750,10 @@ export const __test__ = {
     generateReferralSearchId,
     buildJobSearchUrl,
     extractJobCardsFromDom,
+    fetchJobCardsFromDom,
     fetchJobCards,
+    formatHiringTeam,
+    parseHiringTeamDom,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,

@@ -14,7 +14,10 @@ const {
     generateReferralSearchId,
     buildJobSearchUrl,
     extractJobCardsFromDom,
+    fetchJobCardsFromDom,
     fetchJobCards,
+    formatHiringTeam,
+    parseHiringTeamDom,
     EXPERIENCE_LEVELS,
     JOB_TYPES,
     DATE_POSTED,
@@ -470,5 +473,268 @@ describe('linkedin fetchJobCards fallback to DOM', () => {
         expect(jobs[0].url).toBe('https://www.linkedin.com/jobs/view/888');
     });
 });
+
+describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', () => {
+    function makePageWithCards(pagesData) {
+        let currentPageIndex = 0;
+        return {
+            goto: vi.fn().mockImplementation(async () => {
+                currentPageIndex++;
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn().mockImplementation(async (code) => {
+                if (typeof code === 'string' && code.includes('looksLinkedInAuthWallText')) {
+                    return false;
+                }
+                const cards = pagesData[currentPageIndex] || [];
+                return cards;
+            }),
+        };
+    }
+
+    it('only returns up to limit when limit is smaller than page size', async () => {
+        const page0 = Array.from({ length: 25 }, (_, i) => ({
+            title: `Job ${i + 1}`,
+            company: 'Acme',
+            location: 'Remote',
+            listed: '1d ago',
+            salary: '',
+            url: `https://www.linkedin.com/jobs/view/${1000 + i}`,
+        }));
+        const page = makePageWithCards([page0]);
+
+        const jobs = await fetchJobCardsFromDom(page, {
+            keywords: 'devops',
+            location: 'Australia',
+            limit: 5,
+            start: 0,
+        });
+
+        expect(jobs).toHaveLength(5);
+        expect(jobs.map(j => j.rank)).toEqual([1, 2, 3, 4, 5]);
+        expect(jobs[0].title).toBe('Job 1');
+        expect(jobs[4].title).toBe('Job 5');
+        expect(page.goto).not.toHaveBeenCalled();
+    });
+
+    it('paginates across pages and returns exactly limit items', async () => {
+        const page0 = Array.from({ length: 25 }, (_, i) => ({
+            title: `Job ${i + 1}`,
+            company: 'Acme',
+            location: 'Remote',
+            listed: '1d ago',
+            salary: '',
+            url: `https://www.linkedin.com/jobs/view/${1000 + i}`,
+        }));
+        const page1 = Array.from({ length: 25 }, (_, i) => ({
+            title: `Job ${i + 26}`,
+            company: 'Acme',
+            location: 'Remote',
+            listed: '1d ago',
+            salary: '',
+            url: `https://www.linkedin.com/jobs/view/${2000 + i}`,
+        }));
+        const page = makePageWithCards([page0, page1]);
+
+        const jobs = await fetchJobCardsFromDom(page, {
+            keywords: 'devops',
+            location: 'Australia',
+            limit: 30,
+            start: 0,
+        });
+
+        expect(jobs).toHaveLength(30);
+        expect(jobs[0].rank).toBe(1);
+        expect(jobs[24].title).toBe('Job 25');
+        expect(jobs[25].title).toBe('Job 26');
+        expect(jobs[29].title).toBe('Job 30');
+        expect(jobs[29].rank).toBe(30);
+        expect(page.goto).toHaveBeenCalledTimes(1);
+        expect(page.goto).toHaveBeenCalledWith(expect.stringContaining('start=25'));
+    });
+
+    it('honors start offset for ranking', async () => {
+        const page0 = Array.from({ length: 25 }, (_, i) => ({
+            title: `Job ${i + 1}`,
+            company: 'Acme',
+            location: 'Remote',
+            listed: '1d ago',
+            salary: '',
+            url: `https://www.linkedin.com/jobs/view/${1000 + i}`,
+        }));
+        const page = makePageWithCards([page0]);
+
+        const jobs = await fetchJobCardsFromDom(page, {
+            keywords: 'devops',
+            location: 'Australia',
+            limit: 5,
+            start: 10,
+        });
+
+        expect(jobs).toHaveLength(5);
+        expect(jobs.map(j => j.rank)).toEqual([11, 12, 13, 14, 15]);
+    });
+
+    it('stops pagination when no more jobs are returned', async () => {
+        const page0 = [
+            { title: 'Job 1', company: 'Acme', location: 'Remote', listed: '', salary: '', url: 'https://www.linkedin.com/jobs/view/1' },
+        ];
+        const page = makePageWithCards([page0]);
+
+        const jobs = await fetchJobCardsFromDom(page, {
+            keywords: 'devops',
+            location: 'Australia',
+            limit: 50,
+            start: 0,
+        });
+
+        expect(jobs).toHaveLength(1);
+    });
+});
+
+describe('linkedin hiring team extraction ("Meet the hiring team")', () => {
+    it('extracts recruiter details from alert div with title="Meet the hiring team"', () => {
+        const dom = new JSDOM(`
+            <div role="alert" title="Meet the hiring team">
+                <h2>Meet the hiring team</h2>
+                <div class="hirer-profile">
+                    <a href="https://www.linkedin.com/in/sarah-recruiter?miniProfileUrn=urn%3Ali%3Afsd_profile%3A123">
+                        Sarah Jenkins · 1st
+                    </a>
+                    <div class="hirer-headline">Senior Technical Recruiter at AWS Cloud Solutions</div>
+                </div>
+            </div>
+        `);
+
+        const team = parseHiringTeamDom(dom.window.document);
+        expect(team).toEqual({
+            name: 'Sarah Jenkins',
+            title: 'Senior Technical Recruiter at AWS Cloud Solutions',
+            profile_url: 'https://www.linkedin.com/in/sarah-recruiter',
+        });
+    });
+
+    it('extracts recruiter details from card with heading "Meet the hiring team"', () => {
+        const dom = new JSDOM(`
+            <div class="artdeco-card">
+                <h3>Meet the hiring team</h3>
+                <a href="/in/marcus-vance">
+                    <strong>Marcus Vance</strong>
+                </a>
+                <p class="jobs-poster__headline">Lead Talent Acquisition (he/him)</p>
+            </div>
+        `);
+
+        const team = parseHiringTeamDom(dom.window.document);
+        expect(team).toMatchObject({
+            name: 'Marcus Vance',
+            title: 'Lead Talent Acquisition (he/him)',
+            profile_url: 'https://www.linkedin.com/in/marcus-vance',
+        });
+    });
+
+    it('cleans connection degrees and pronouns from recruiter name', () => {
+        const dom = new JSDOM(`
+            <div title="Meet the hiring team">
+                <a href="https://www.linkedin.com/in/jane-doe">Jane Doe (she/her) · 2nd</a>
+                <div>Head of Engineering</div>
+            </div>
+        `);
+
+        const team = parseHiringTeamDom(dom.window.document);
+        expect(team?.name).toBe('Jane Doe');
+        expect(team?.title).toBe('Head of Engineering');
+    });
+
+    it('returns null when no hiring team container is present', () => {
+        const dom = new JSDOM(`
+            <div class="job-view">
+                <h2>About the job</h2>
+                <p>We are looking for a DevOps engineer.</p>
+            </div>
+        `);
+
+        expect(parseHiringTeamDom(dom.window.document)).toBeNull();
+    });
+
+    it('formatHiringTeam handles null, strings, and custom toString formatting', () => {
+        expect(formatHiringTeam(null)).toBeNull();
+        expect(formatHiringTeam(undefined)).toBeNull();
+        expect(formatHiringTeam({})).toBeNull();
+
+        const formatted = formatHiringTeam({
+            name: 'Alex Rivera',
+            title: 'Talent Sourcer',
+            profile_url: 'https://www.linkedin.com/in/alex-rivera?trk=jobs',
+        });
+        expect(formatted).toMatchObject({
+            name: 'Alex Rivera',
+            title: 'Talent Sourcer',
+            profile_url: 'https://www.linkedin.com/in/alex-rivera',
+        });
+        expect(String(formatted)).toBe('Alex Rivera (Talent Sourcer)');
+        expect(JSON.parse(JSON.stringify(formatted))).toEqual({
+            name: 'Alex Rivera',
+            title: 'Talent Sourcer',
+            profile_url: 'https://www.linkedin.com/in/alex-rivera',
+        });
+    });
+});
+
+describe('linkedin enrichJobDetails with hiring_team', () => {
+    it('populates hiring_team when job detail page contains hiring team', async () => {
+        const page = {
+            goto: vi.fn().mockResolvedValue(undefined),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn()
+                .mockResolvedValueOnce(false) // auth wall probe
+                .mockResolvedValueOnce(undefined) // show more button
+                .mockResolvedValueOnce({
+                    description: 'Great job description',
+                    applyUrl: 'https://example.com/apply',
+                    hiringTeam: {
+                        name: 'Emma Watson',
+                        title: 'Technical Recruiter',
+                        profile_url: 'https://www.linkedin.com/in/emma-watson',
+                    },
+                }),
+        };
+
+        const [enriched] = await enrichJobDetails(page, [
+            { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
+        ]);
+
+        expect(enriched.description).toBe('Great job description');
+        expect(enriched.apply_url).toBe('https://example.com/apply');
+        expect(enriched.hiring_team).toMatchObject({
+            name: 'Emma Watson',
+            title: 'Technical Recruiter',
+            profile_url: 'https://www.linkedin.com/in/emma-watson',
+        });
+        expect(enriched.detail_error).toBeNull();
+    });
+
+    it('sets hiring_team: null when detail page does not have hiring team', async () => {
+        const page = {
+            goto: vi.fn().mockResolvedValue(undefined),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn()
+                .mockResolvedValueOnce(false)
+                .mockResolvedValueOnce(undefined)
+                .mockResolvedValueOnce({
+                    description: 'Great job description',
+                    applyUrl: '',
+                    hiringTeam: null,
+                }),
+        };
+
+        const [enriched] = await enrichJobDetails(page, [
+            { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
+        ]);
+
+        expect(enriched.hiring_team).toBeNull();
+    });
+});
+
 
 
