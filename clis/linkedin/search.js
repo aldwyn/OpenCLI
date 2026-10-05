@@ -486,8 +486,26 @@ async function fetchJobCardsFromDom(page, input) {
             break;
         }
 
-        let newJobsAdded = 0;
+        const needed = input.limit - allJobs.length;
+        const currentBatch = [];
         for (const job of pageJobs) {
+            if (!seenUrls.has(job.url)) {
+                currentBatch.push(job);
+                if (currentBatch.length >= needed) break;
+            }
+        }
+
+        if (currentBatch.length === 0) {
+            break;
+        }
+
+        // When details are requested, click the entry div from top to bottom of the current page before going to next page
+        const processedBatch = input.includeDetails
+            ? await enrichJobDetails(page, currentBatch)
+            : currentBatch;
+
+        let newJobsAdded = 0;
+        for (const job of processedBatch) {
             if (!seenUrls.has(job.url)) {
                 seenUrls.add(job.url);
                 allJobs.push(job);
@@ -918,6 +936,7 @@ cli({
             location,
             limit,
             start,
+            includeDetails,
             referralSearchId,
             companyIds,
             experienceLevels: mapFilterValues(kwargs['experience-level'], EXPERIENCE_LEVELS, 'experience_level'),
@@ -928,6 +947,9 @@ cli({
         const data = await fetchJobCards(page, input);
         if (!includeDetails)
             return data;
+        if (data.length > 0 && ('description' in data[0] || 'hiring_team' in data[0])) {
+            return data;
+        }
         return enrichJobDetails(page, data);
     },
 });

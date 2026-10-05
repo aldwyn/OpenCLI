@@ -595,6 +595,41 @@ describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', (
 
         expect(jobs).toHaveLength(1);
     });
+
+    it('enriches entries page-by-page from top to bottom before going to the next page when includeDetails is true', async () => {
+        const page0 = [
+            { title: 'Job 1', company: 'Acme', location: 'Remote', listed: '', salary: '', url: 'https://www.linkedin.com/jobs/view/1' },
+            { title: 'Job 2', company: 'Acme', location: 'Remote', listed: '', salary: '', url: 'https://www.linkedin.com/jobs/view/2' },
+        ];
+        const page = makePageWithCards([page0]);
+        const origEvaluate = page.evaluate;
+        page.evaluate = vi.fn(async (code) => {
+            if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('targetIndex'))) {
+                return false;
+            }
+            if (typeof code === 'string' && code.includes('login__form')) {
+                return false;
+            }
+            if (typeof code === 'string' && code.includes('About the job')) {
+                return { description: 'Detail for job', applyUrl: 'https://example.com/apply', hiringTeam: null };
+            }
+            return origEvaluate(code);
+        });
+
+        const jobs = await fetchJobCardsFromDom(page, {
+            keywords: 'devops',
+            location: 'Australia',
+            limit: 2,
+            start: 0,
+            includeDetails: true,
+        });
+
+        expect(jobs).toHaveLength(2);
+        expect(jobs[0].description).toBe('Detail for job');
+        expect(jobs[1].description).toBe('Detail for job');
+        expect(jobs[0].rank).toBe(1);
+        expect(jobs[1].rank).toBe(2);
+    });
 });
 
 describe('linkedin hiring team extraction ("Meet the hiring team")', () => {
