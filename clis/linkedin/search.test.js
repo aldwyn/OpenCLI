@@ -16,6 +16,8 @@ const {
     fetchJobCards,
     clickJobCardInDom,
     extractJobDetailsFromDom,
+    cleanJobDescription,
+    formatJobDescription,
     StreamWriter,
     resolveOutputFormat,
     resolveOutputFile,
@@ -1025,6 +1027,64 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(result.hiringTeam).toBeUndefined();
     });
 });
+
+describe('linkedin job description markdown formatting and whitespace preservation', () => {
+    it('formats HTML job details into structured markdown preserving paragraphs, lists, and headings', () => {
+        const html = `
+            <h2>About the job</h2>
+            <p>We are looking for a Senior DevOps Engineer in Sydney, Australia.</p>
+            <h3>Responsibilities:</h3>
+            <ul>
+                <li>Design CI/CD pipelines on AWS</li>
+                <li>Manage Kubernetes clusters</li>
+            </ul>
+            <h3>Requirements:</h3>
+            <p>5+ years experience with Terraform.<br>Strong Linux administration skills.</p>
+            <div role="alert" title="Meet the hiring team">
+                <a href="#">Jane Doe</a>
+            </div>
+        `;
+        const md = formatJobDescription(html, '');
+        expect(md).toContain('We are looking for a Senior DevOps Engineer in Sydney, Australia.');
+        expect(md).toContain('### Responsibilities:');
+        expect(md).toContain('-   Design CI/CD pipelines on AWS');
+        expect(md).toContain('-   Manage Kubernetes clusters');
+        expect(md).toContain('### Requirements:');
+        expect(md).toContain('5+ years experience with Terraform.\nStrong Linux administration skills.');
+        expect(md).not.toContain('About the job');
+        expect(md).not.toContain('Meet the hiring team');
+        // Ensure whitespace and newlines are preserved, not flattened into a single line
+        expect(md.split('\n').length).toBeGreaterThan(5);
+    });
+
+    it('preserves whitespaces and newlines in plain text descriptions without collapsing them into one line', () => {
+        const text = [
+            'We are seeking an AWS DevOps Specialist.',
+            '',
+            'Key Duties:',
+            '- CI/CD automation',
+            '- Container orchestration',
+            '',
+            'Skills needed: Terraform, AWS, Docker.',
+            '…more',
+        ].join('\n');
+
+        const cleaned = formatJobDescription('', text);
+        expect(cleaned).toContain('We are seeking an AWS DevOps Specialist.\n\nKey Duties:\n- CI/CD automation\n- Container orchestration');
+        expect(cleaned).toContain('Skills needed: Terraform, AWS, Docker.');
+        expect(cleaned).not.toMatch(/more$/);
+        expect(cleaned.split('\n')).toHaveLength(7);
+    });
+
+    it('cleans redundant heading, hiring team widget, and trailing more button cleanly', () => {
+        expect(cleanJobDescription('## About the job\n\nSoftware Engineer role')).toBe('Software Engineer role');
+        expect(cleanJobDescription('**About the job**\n\nSoftware Engineer role')).toBe('Software Engineer role');
+        expect(cleanJobDescription('Role details\n\nMeet the hiring team\nRecruiter')).toBe('Role details');
+        expect(cleanJobDescription('Role details\n\n...more')).toBe('Role details');
+        expect(cleanJobDescription('Role details\n\nshow more')).toBe('Role details');
+    });
+});
+
 
 
 

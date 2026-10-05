@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import yaml from 'js-yaml';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, AuthRequiredError } from '@jackwener/opencli/errors';
+import { htmlToMarkdown } from '@jackwener/opencli/utils';
 
 const LINKEDIN_DOMAIN = 'linkedin.com';
 const MIN_LIMIT = 1;
@@ -14,6 +15,30 @@ const MIN_START = 0;
 
 function normalizeWhitespace(value) {
     return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function cleanJobDescription(text) {
+    if (!text) return '';
+    return text
+        .replace(/^(?:#*\s*|\*\*\s*)About the job(?:\*\*)?\s*/i, '')
+        .replace(/(?:#*\s*|\*\*\s*)?Meet the hiring team[\s\S]*$/i, '')
+        .replace(/\s*(?:(?:\.{3}|…)\s*)?(?:show\s+more|see\s+more|show\s+less|see\s+less|more|less|\.{3}|…)\s*$/i, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/[ \t]+$/gm, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+function formatJobDescription(html, rawText) {
+    if (html && /<[a-z][\s\S]*>/i.test(html)) {
+        try {
+            const md = htmlToMarkdown(html);
+            if (md && md.length > 0) {
+                return cleanJobDescription(md);
+            }
+        } catch {}
+    }
+    return cleanJobDescription(rawText);
 }
 
 function parseIntegerArg(value, label, fallback, min, max = Infinity) {
@@ -798,38 +823,42 @@ async function extractJobDetailsFromDom(page) {
             ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
             : Array.from(document.querySelectorAll('div, section, article, main'));
 
-        // 1. Search by heading "About the job" across any tag
-        const candidates = scope
-          .map(el => ({
-            heading: norm(el.querySelector('h1,h2,h3,h4,h5,h6, [class*="heading"], span, p, div, strong')?.textContent || ''),
-            text: norm(el.innerText || el.textContent || ''),
-          }))
-          .filter(c => c.text && c.heading.toLowerCase() === 'about the job' && c.text.length > 'About the job'.length)
-          .sort((a, b) => a.text.length - b.text.length);
+        let targetDescEl = (rightPane || document).querySelector?.('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
 
-        let description = candidates[0]?.text.replace(/^About the job\\s*/i, '') || '';
+        if (!targetDescEl) {
+            const scope = rightPane
+                ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
+                : Array.from(document.querySelectorAll('div, section, article, main'));
 
-        // 2. If no candidate found, search for any element containing "about the job" heading text
-        if (!description) {
+            const candidates = scope
+                .map(el => ({
+                    el,
+                    heading: norm(el.querySelector('h1,h2,h3,h4,h5,h6, [class*="heading"], span, p, div, strong')?.textContent || ''),
+                    text: (el.innerText || el.textContent || '').trim(),
+                }))
+                .filter(c => c.text && c.heading.toLowerCase() === 'about the job' && c.text.length > 'About the job'.length)
+                .sort((a, b) => a.text.length - b.text.length);
+
+            if (candidates[0]?.el) {
+                targetDescEl = candidates[0].el;
+            }
+        }
+
+        if (!targetDescEl) {
             const headingEl = Array.from((rightPane || document).querySelectorAll('h1,h2,h3,h4,h5,h6,span,p,div,strong,b'))
                 .find(el => {
                     const t = norm(el.textContent || '').toLowerCase();
                     return t === 'about the job' || t.startsWith('about the job');
                 });
             if (headingEl) {
-                const parent = headingEl.closest('section, article, div') || headingEl.parentElement;
-                if (parent) {
-                    description = norm(parent.innerText || parent.textContent || '').replace(/^About the job\\s*/i, '');
-                }
+                targetDescEl = headingEl.closest('section, article, div') || headingEl.parentElement;
             }
         }
 
-        // 3. Fallback to standard description container selectors
-        if (!description) {
-            const descEl = (rightPane || document).querySelector?.('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
-            if (descEl) {
-                description = norm(descEl.innerText || descEl.textContent || '');
-            }
+        const descriptionHtml = targetDescEl ? (targetDescEl.innerHTML || '') : '';
+        let description = targetDescEl ? (targetDescEl.innerText || targetDescEl.textContent || '') : '';
+        if (!description && rightPane) {
+            description = rightPane.innerText || rightPane.textContent || '';
         }
 
         description = description
@@ -842,10 +871,14 @@ async function extractJobDetailsFromDom(page) {
           .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
           .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
 
-        return { description, applyUrl: applyLink?.href || '' };
+        return { description, descriptionHtml, applyUrl: applyLink?.href || '' };
     })()`);
 
-    return detail;
+    const description = formatJobDescription(detail?.descriptionHtml, detail?.description);
+    return {
+        description,
+        applyUrl: detail?.applyUrl || '',
+    };
 }
 
 async function enrichJobDetails(page, jobs, options = {}) {
@@ -892,7 +925,7 @@ async function enrichJobDetails(page, jobs, options = {}) {
                 detail = await extractJobDetailsFromDom(page);
             }
 
-            const description = normalizeWhitespace(detail?.description);
+            const description = detail?.description ? cleanJobDescription(detail.description) : null;
             const apply_url = decodeLinkedinRedirect(String(detail?.applyUrl ?? ''));
 
             const detail_error = description ? null : 'missing description';
@@ -1011,6 +1044,8 @@ export const __test__ = {
     fetchJobCards,
     clickJobCardInDom,
     extractJobDetailsFromDom,
+    cleanJobDescription,
+    formatJobDescription,
     StreamWriter,
     resolveOutputFormat,
     resolveOutputFile,
