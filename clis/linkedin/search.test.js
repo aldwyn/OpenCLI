@@ -9,6 +9,7 @@ const {
     decodeLinkedinRedirect,
     looksLinkedInAuthWallText,
     enrichJobDetails,
+    isDetailMatchingJob,
     generateReferralSearchId,
     buildJobSearchUrl,
     extractJobCardsFromDom,
@@ -1085,6 +1086,148 @@ describe('linkedin job description markdown formatting and whitespace preservati
     });
 });
 
+describe('linkedin unique job details matching and deduplication (prevent identical details across jobs)', () => {
+    it('isDetailMatchingJob correctly validates candidate details against target job', () => {
+        const job1 = { title: 'Senior DevOps Engineer', url: 'https://www.linkedin.com/jobs/view/1001' };
+        const job2 = { title: 'Cloud Infrastructure Architect', url: 'https://www.linkedin.com/jobs/view/1002' };
 
+        // 1. Matches when pane has matching job ID
+        expect(isDetailMatchingJob({ description: 'DevOps role', paneJobIds: ['1001'], paneTitle: 'Senior DevOps' }, job1)).toBe(true);
+        // 2. Rejects when pane has a different job ID (e.g. Job 1 is in pane, checking for Job 2)
+        expect(isDetailMatchingJob({ description: 'DevOps role', paneJobIds: ['1001'], paneTitle: 'Senior DevOps' }, job2)).toBe(false);
+        // 3. Matches by title when paneJobIds is empty
+        expect(isDetailMatchingJob({ description: 'Cloud role', paneJobIds: [], paneTitle: 'Cloud Infrastructure Architect (Verified Job)' }, job2)).toBe(true);
+        // 4. Rejects when title completely differs
+        expect(isDetailMatchingJob({ description: 'DevOps role', paneJobIds: [], paneTitle: 'Senior DevOps Engineer' }, job2)).toBe(false);
+        // 5. Returns false when description is missing
+        expect(isDetailMatchingJob({ description: '', paneJobIds: ['1001'] }, job1)).toBe(false);
+        expect(isDetailMatchingJob(null, job1)).toBe(false);
+    });
 
+    it('enriches consecutive jobs with their distinct details instead of repeating Job 0 details', async () => {
+        let activeJobId = '1001';
+        const dom = new JSDOM(`
+            <div id="search-results">
+                <div componentkey="job-card-component-ref-1001" class="job-card-container">
+                    <a class="job-card-list__title" href="/jobs/view/1001">Senior DevOps Engineer</a>
+                    <div class="job-card-body"><p>CloudCo</p></div>
+                </div>
+                <div componentkey="job-card-component-ref-1002" class="job-card-container">
+                    <a class="job-card-list__title" href="/jobs/view/1002">Cloud Architect</a>
+                    <div class="job-card-body"><p>SkyNet</p></div>
+                </div>
+            </div>
+            <div class="jobs-search__job-details--container">
+                <h1 class="job-title-el">Senior DevOps Engineer</h1>
+                <a href="/jobs/view/1001" class="top-card-link">View original</a>
+                <h2>About the job</h2>
+                <div id="desc-body">DevOps description for job 1001</div>
+                <a href="https://example.com/apply/1001">Apply 1001</a>
+            </div>
+        `);
 
+        // When card 2 is clicked in DOM, update right pane details to job 1002
+        const card2 = dom.window.document.querySelectorAll('.job-card-container')[1];
+        card2.addEventListener('click', () => {
+            activeJobId = '1002';
+            dom.window.document.querySelector('.job-title-el').textContent = 'Cloud Architect';
+            dom.window.document.querySelector('.top-card-link').setAttribute('href', '/jobs/view/1002');
+            dom.window.document.querySelector('#desc-body').textContent = 'Cloud Architect description for job 1002';
+            dom.window.document.querySelector('a[href*="apply"]').setAttribute('href', 'https://example.com/apply/1002');
+        });
+
+        const page = {
+            goto: vi.fn().mockResolvedValue(undefined),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const jobs = [
+            { rank: 1, title: 'Senior DevOps Engineer', url: 'https://www.linkedin.com/jobs/view/1001' },
+            { rank: 2, title: 'Cloud Architect', url: 'https://www.linkedin.com/jobs/view/1002' },
+        ];
+
+        const enriched = await enrichJobDetails(page, jobs);
+
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(enriched).toHaveLength(2);
+
+        // Verify Job 0 and Job 1 have their respective distinct descriptions and apply URLs
+        expect(enriched[0].description).toContain('DevOps description for job 1001');
+        expect(enriched[0].apply_url).toBe('https://example.com/apply/1001');
+
+        expect(enriched[1].description).toContain('Cloud Architect description for job 1002');
+        expect(enriched[1].apply_url).toBe('https://example.com/apply/1002');
+
+        // Crucial assertion: ensure details are NOT identical across different jobs
+        expect(enriched[0].description).not.toEqual(enriched[1].description);
+        expect(enriched[0].apply_url).not.toEqual(enriched[1].apply_url);
+    });
+
+    it('falls back to dedicated page and returns to searchUrl when right pane does not switch to target job', async () => {
+        const dom = new JSDOM(`
+            <div id="search-results">
+                <div componentkey="job-card-component-ref-1001" class="job-card-container">
+                    <a class="job-card-list__title" href="/jobs/view/1001">Senior DevOps Engineer</a>
+                    <div class="job-card-body"><p>CloudCo</p></div>
+                </div>
+                <div componentkey="job-card-component-ref-1002" class="job-card-container">
+                    <a class="job-card-list__title" href="/jobs/view/1002">Cloud Architect</a>
+                    <div class="job-card-body"><p>SkyNet</p></div>
+                </div>
+            </div>
+            <div class="jobs-search__job-details--container">
+                <h1 class="job-title-el">Senior DevOps Engineer</h1>
+                <a href="/jobs/view/1001" class="top-card-link">View original</a>
+                <h2>About the job</h2>
+                <div id="desc-body">DevOps description for job 1001</div>
+                <a href="https://example.com/apply/1001">Apply 1001</a>
+            </div>
+        `);
+
+        // Right pane is STUCK on job 1001 (does NOT update when clicking card 2)
+        const dedicatedJob2Dom = new JSDOM(`
+            <div class="dedicated-job-page">
+                <h1 class="job-title-el">Cloud Architect</h1>
+                <a href="/jobs/view/1002">View 1002</a>
+                <h2>About the job</h2>
+                <div>Dedicated page description for Cloud Architect 1002</div>
+                <a href="https://example.com/apply/1002-fallback">Apply fallback</a>
+            </div>
+        `);
+
+        let currentDom = dom;
+        const page = {
+            goto: vi.fn(async (url) => {
+                if (url.includes('/jobs/view/1002')) {
+                    currentDom = dedicatedJob2Dom;
+                } else {
+                    currentDom = dom;
+                }
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(currentDom.window.document, currentDom.window);
+            }),
+        };
+
+        const jobs = [
+            { rank: 1, title: 'Senior DevOps Engineer', url: 'https://www.linkedin.com/jobs/view/1001' },
+            { rank: 2, title: 'Cloud Architect', url: 'https://www.linkedin.com/jobs/view/1002' },
+        ];
+
+        const enriched = await enrichJobDetails(page, jobs, { searchUrl: 'https://www.linkedin.com/jobs/search?keywords=test' });
+
+        expect(page.goto).toHaveBeenCalledWith('https://www.linkedin.com/jobs/view/1002');
+        expect(enriched[0].description).toContain('DevOps description for job 1001');
+        expect(enriched[1].description).toContain('Dedicated page description for Cloud Architect 1002');
+        expect(enriched[1].apply_url).toBe('https://example.com/apply/1002-fallback');
+
+        // Confirmed: Job 1 did NOT reuse Job 0's description!
+        expect(enriched[0].description).not.toEqual(enriched[1].description);
+    });
+});

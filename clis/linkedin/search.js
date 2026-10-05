@@ -41,6 +41,31 @@ function formatJobDescription(html, rawText) {
     return cleanJobDescription(rawText);
 }
 
+function isDetailMatchingJob(detail, job) {
+    if (!detail || !detail.description) return false;
+    const targetJobId = (job?.url || '').match(/\/jobs\/view\/(\d+)/)?.[1];
+    if (targetJobId && Array.isArray(detail.paneJobIds) && detail.paneJobIds.length > 0) {
+        return detail.paneJobIds.includes(targetJobId);
+    }
+    const clean = (v) => String(v || '').toLowerCase()
+        .replace(/\(verified job\)/gi, '')
+        .replace(/[·•|].*$/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    const cleanJobTitle = clean(job?.title);
+    let cleanPaneTitle = clean(detail?.paneTitle);
+    if (cleanPaneTitle === 'about the job') {
+        cleanPaneTitle = '';
+    }
+    if (cleanJobTitle && cleanPaneTitle) {
+        return cleanPaneTitle.includes(cleanJobTitle) || cleanJobTitle.includes(cleanPaneTitle);
+    }
+    if (!cleanPaneTitle && (!detail?.paneJobIds || detail.paneJobIds.length === 0)) {
+        return true;
+    }
+    return false;
+}
+
 function parseIntegerArg(value, label, fallback, min, max = Infinity) {
     if (value === undefined || value === null || value === '')
         return fallback;
@@ -288,8 +313,10 @@ async function extractJobCardsFromDom(page) {
             const dataJobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id');
             const link = card.querySelector('a[href*="/jobs/view/"]');
             const linkMatch = (link?.getAttribute('href') || '').match(/\\/jobs\\/view\\/(\\d+)/);
-            const jobId = keyMatch?.[1] || dataJobId || linkMatch?.[1] || '';
-            const canonicalUrl = jobId ? ('https://www.linkedin.com/jobs/view/' + jobId) : (link?.href ? link.href.split('?')[0] : '');
+            const jobId = dataJobId || linkMatch?.[1] || keyMatch?.[1] || '';
+            const canonicalUrl = jobId
+                ? ('https://www.linkedin.com/jobs/view/' + jobId)
+                : (link?.href ? (link.href.startsWith('http') ? link.href.split('?')[0] : 'https://www.linkedin.com' + link.href.split('?')[0]) : '');
 
             const paragraphs = Array.from(card.querySelectorAll('p')).map(p => (p.innerText || p.textContent || '').trim()).filter(Boolean);
 
@@ -375,13 +402,13 @@ async function fetchJobCardsFromDom(page, input, options = {}) {
     let pagesFetched = 0;
 
     while (allJobs.length < input.limit && pagesFetched < maxPages) {
+        const currentSearchUrl = buildJobSearchUrl({
+            keywords: input.keywords,
+            start: currentStart,
+            referralSearchId,
+        });
         if (pagesFetched > 0) {
-            const targetUrl = buildJobSearchUrl({
-                keywords: input.keywords,
-                start: currentStart,
-                referralSearchId,
-            });
-            await page.goto(targetUrl);
+            await page.goto(currentSearchUrl);
             await assertLinkedInAuthenticated(page, 'LinkedIn search');
             await page.wait({ text: 'Jobs', timeout: 10 });
         }
@@ -408,6 +435,7 @@ async function fetchJobCardsFromDom(page, input, options = {}) {
         // When details are requested, click the entry div from top to bottom of the current page before going to next page
         const processedBatch = input.includeDetails
             ? await enrichJobDetails(page, currentBatch, {
+                searchUrl: currentSearchUrl,
                 onDetailFetched: (job, batchIndex) => {
                     const rankedJob = {
                         rank: input.start + allJobs.length + batchIndex + 1,
@@ -584,7 +612,7 @@ async function clickJobCardInDom(page, job, index = 0) {
             return false;
         }
 
-        // 1. Gather all job card containers present in the DOM (in document order: top to bottom)
+        // 1. Gather all outermost job card containers present in the DOM (in document order: top to bottom)
         const standardCardSelector = [
             '[componentkey^="job-card-component-ref-"]',
             '[data-occludable-job-id]',
@@ -595,7 +623,8 @@ async function clickJobCardInDom(page, job, index = 0) {
             'ul.jobs-search__results-list > li'
         ].join(', ');
 
-        let cards = Array.from(document.querySelectorAll(standardCardSelector));
+        const rawCards = Array.from(document.querySelectorAll(standardCardSelector));
+        let cards = rawCards.filter(c => !rawCards.some(other => other !== c && other.contains(c)));
 
         // If no standard card classes are found, derive cards from all job view links in the list
         if (cards.length === 0) {
@@ -871,18 +900,53 @@ async function extractJobDetailsFromDom(page) {
           .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
           .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
 
-        return { description, descriptionHtml, applyUrl: applyLink?.href || '' };
+        // Extract title and job IDs of the job currently rendered in rightPane
+        let paneTitleEl = (rightPane || document).querySelector?.(
+            '.job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title, [class*="job-title"], h1'
+        );
+        if (!paneTitleEl) {
+            const headings = Array.from((rightPane || document).querySelectorAll('h1, h2, h3'));
+            paneTitleEl = headings.find(h => norm(h.textContent || '').toLowerCase() !== 'about the job');
+        }
+        let paneTitle = norm(paneTitleEl?.innerText || paneTitleEl?.textContent || '');
+        if (norm(paneTitle).toLowerCase() === 'about the job') {
+            paneTitle = '';
+        }
+
+        let paneLinks = Array.from((rightPane || document).querySelectorAll?.('a[href*="/jobs/view/"]') || []);
+        let paneJobIds = paneLinks.map(a => (a.getAttribute('href') || '').match(/\\/jobs\\/view\\/(\\d+)/)?.[1]).filter(Boolean);
+        const idContainer = rightPane || document;
+        const idEls = Array.from(idContainer?.querySelectorAll?.('[data-job-id], [data-occludable-job-id], [data-entity-urn*="jobPosting"]') || []);
+        if (idContainer?.getAttribute) idEls.push(idContainer);
+        for (const el of idEls) {
+            const id = el.getAttribute?.('data-job-id') || el.getAttribute?.('data-occludable-job-id');
+            if (id && /^\\d+$/.test(id)) paneJobIds.push(id);
+            const urn = el.getAttribute?.('data-entity-urn') || '';
+            const um = urn.match(/jobPosting:(\\d+)/);
+            if (um?.[1]) paneJobIds.push(um[1]);
+        }
+        if (typeof window !== 'undefined' && window.location?.href) {
+            const m = window.location.href.match(/\\/jobs\\/view\\/(\\d+)/);
+            if (m?.[1]) paneJobIds.push(m[1]);
+        }
+
+        return { description, descriptionHtml, applyUrl: applyLink?.href || '', paneTitle, paneJobIds };
     })()`);
 
     const description = formatJobDescription(detail?.descriptionHtml, detail?.description);
     return {
         description,
+        descriptionHtml: detail?.descriptionHtml || '',
         applyUrl: detail?.applyUrl || '',
+        paneTitle: detail?.paneTitle || '',
+        paneJobIds: detail?.paneJobIds || [],
     };
 }
 
 async function enrichJobDetails(page, jobs, options = {}) {
     const onDetailFetched = typeof options === 'function' ? options : options?.onDetailFetched;
+    const searchUrl = typeof options === 'object' ? options?.searchUrl : null;
+    let navigatedAway = false;
     const enriched = [];
     for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
@@ -900,26 +964,39 @@ async function enrichJobDetails(page, jobs, options = {}) {
             continue;
         }
         try {
-            let detail = null;
-            let clicked = false;
-            try {
-                clicked = await clickJobCardInDom(page, job, i);
-            } catch {
-                clicked = false;
+            if (navigatedAway && searchUrl) {
+                await page.goto(searchUrl);
+                await assertLinkedInAuthenticated(page, 'LinkedIn search');
+                await page.wait({ text: 'Jobs', timeout: 10 }).catch(() => {});
+                navigatedAway = false;
             }
 
-            if (clicked) {
-                // Poll right pane up to 3s for details to render in-place
-                for (let attempt = 0; attempt < 6; attempt++) {
-                    await page.wait(0.5);
-                    detail = await extractJobDetailsFromDom(page);
-                    if (detail?.description) break;
+            let detail = null;
+            let clicked = false;
+            if (!navigatedAway) {
+                try {
+                    clicked = await clickJobCardInDom(page, job, i);
+                } catch {
+                    clicked = false;
                 }
             }
 
-            // Fallback: If card was not in current DOM or in-place loading did not yield a description
+            if (clicked) {
+                // Poll right pane up to 3s for details to render in-place and match the requested job
+                for (let attempt = 0; attempt < 6; attempt++) {
+                    await page.wait(0.5);
+                    const candidate = await extractJobDetailsFromDom(page);
+                    if (isDetailMatchingJob(candidate, job)) {
+                        detail = candidate;
+                        break;
+                    }
+                }
+            }
+
+            // Fallback: If card was not in current DOM or in-place loading did not yield a matching description
             if (!detail || !detail.description) {
                 await page.goto(job.url);
+                navigatedAway = true;
                 await assertLinkedInAuthenticated(page, 'LinkedIn job detail');
                 await page.wait({ text: 'About the job', timeout: 8 }).catch(() => {});
                 detail = await extractJobDetailsFromDom(page);
@@ -1005,6 +1082,7 @@ cli({
         };
 
         const options = {
+            searchUrl,
             onDetailFetched: (job, index) => {
                 if (streamWriter) {
                     const rankedJob = ('rank' in job)
@@ -1037,6 +1115,7 @@ export const __test__ = {
     looksLinkedInAuthWallText,
     assertLinkedInAuthenticated,
     enrichJobDetails,
+    isDetailMatchingJob,
     generateReferralSearchId,
     buildJobSearchUrl,
     extractJobCardsFromDom,
