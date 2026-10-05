@@ -951,6 +951,52 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(enriched.apply_url).toBe('https://example.com/apply/fallback');
         expect(enriched.detail_error).toBeNull();
     });
+
+    it('does not click "Learn more filter" or filter buttons when expanding job description', async () => {
+        const dom = new JSDOM(`
+            <header>
+                <div class="search-reusables__filter-list">
+                    <button id="learn-more-filter" aria-label="Learn more filter">Learn more</button>
+                    <button id="more-filters" aria-label="All filters">More filters</button>
+                </div>
+            </header>
+            <div class="semantic-details-pane">
+                <h2>About the job</h2>
+                <div class="job-details-content">
+                    <p>Job content here</p>
+                    <button id="show-more-desc" aria-label="Show more description">Show more</button>
+                </div>
+            </div>
+        `);
+
+        let learnMoreClicked = false;
+        let moreFiltersClicked = false;
+        let showMoreClicked = false;
+
+        dom.window.document.querySelector('#learn-more-filter').addEventListener('click', () => {
+            learnMoreClicked = true;
+        });
+        dom.window.document.querySelector('#more-filters').addEventListener('click', () => {
+            moreFiltersClicked = true;
+        });
+        dom.window.document.querySelector('#show-more-desc').addEventListener('click', () => {
+            showMoreClicked = true;
+        });
+
+        const page = {
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+        };
+
+        await extractJobDetailsFromDom(page);
+
+        expect(learnMoreClicked).toBe(false);
+        expect(moreFiltersClicked).toBe(false);
+        expect(showMoreClicked).toBe(true);
+    });
 });
 
 

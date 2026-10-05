@@ -800,28 +800,59 @@ async function extractJobDetailsFromDom(page) {
     // Expand "Show more" button if present
     await page.evaluate(`(() => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const rightPane = document.querySelector(
-            '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"]'
-        ) || document;
+        
+        let detailsPane = document.querySelector(
+            '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"], #job-details, .jobs-description'
+        );
 
-        const buttons = Array.from(rightPane.querySelectorAll('button, a[role="button"], span[role="button"]'));
-        const moreBtn = buttons.find(b => {
-            const t = norm(b.textContent || '');
-            const aria = norm(b.getAttribute('aria-label') || '');
-            return /show more|see more|\\bmore\\b/i.test(t) || /show more|see more|\\bmore\\b/i.test(aria);
-        });
-        if (moreBtn) moreBtn.click();
+        if (!detailsPane) {
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, span, strong, div, p'));
+            const aboutHeading = headings.find(el => {
+                const t = norm(el.textContent || '');
+                return t === 'about the job' || t.startsWith('about the job');
+            });
+            if (aboutHeading) {
+                detailsPane = aboutHeading.closest('section, article, div[class*="detail"], div[class*="description"]') || 
+                              aboutHeading.parentElement?.parentElement || 
+                              aboutHeading.parentElement;
+            }
+        }
+
+        if (detailsPane) {
+            const buttons = Array.from(detailsPane.querySelectorAll('button, a[role="button"], span[role="button"]'));
+            const moreBtn = buttons.find(b => {
+                if (b.closest('header, nav, [role="navigation"], [class*="filter"], [aria-label*="filter"]')) return false;
+                const t = norm(b.textContent || '');
+                const aria = norm(b.getAttribute('aria-label') || '');
+                if (/filter|learn\\s*more/i.test(t) || /filter|learn\\s*more/i.test(aria)) return false;
+                return /^(?:show\\s+more|see\\s+more)(?:\\s+.*)?$/i.test(t) || /^(?:show\\s+more|see\\s+more)(?:\\s+.*)?$/i.test(aria);
+            });
+            if (moreBtn) moreBtn.click();
+        }
     })()`);
 
     await page.wait(0.3);
 
     const detail = await page.evaluate(`(() => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim();
-        const rightPane = document.querySelector(
-            '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"]'
-        ) || document;
+        let rightPane = document.querySelector(
+            '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"], #job-details, .jobs-description'
+        );
 
-        const scope = rightPane && rightPane !== document
+        if (!rightPane) {
+            const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, span, strong, div, p'));
+            const aboutHeading = headings.find(el => {
+                const t = norm(el.textContent || '').toLowerCase();
+                return t === 'about the job' || t.startsWith('about the job');
+            });
+            if (aboutHeading) {
+                rightPane = aboutHeading.closest('section, article, div[class*="detail"], div[class*="description"]') || 
+                            aboutHeading.parentElement?.parentElement || 
+                            aboutHeading.parentElement;
+            }
+        }
+
+        const scope = rightPane
             ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
             : Array.from(document.querySelectorAll('div, section, article, main'));
 
@@ -838,7 +869,7 @@ async function extractJobDetailsFromDom(page) {
 
         // 2. If no candidate found, search for any element containing "about the job" heading text
         if (!description) {
-            const headingEl = Array.from(rightPane.querySelectorAll('h1,h2,h3,h4,h5,h6,span,p,div,strong,b'))
+            const headingEl = Array.from((rightPane || document).querySelectorAll('h1,h2,h3,h4,h5,h6,span,p,div,strong,b'))
                 .find(el => {
                     const t = norm(el.textContent || '').toLowerCase();
                     return t === 'about the job' || t.startsWith('about the job');
