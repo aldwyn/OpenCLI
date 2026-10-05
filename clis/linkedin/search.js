@@ -614,13 +614,75 @@ async function fetchJobCards(page, input) {
 // be found on the current page or in-page loading fails to yield a description,
 // it gracefully falls back to `page.goto(job.url)`.
 
-async function clickJobCardInDom(page, job) {
+async function clickJobCardInDom(page, job, index = 0) {
     const jobId = String(job.url || '').match(/\/jobs\/view\/(\d+)/)?.[1] || '';
-    const clicked = await page.evaluate(`((targetJobId, targetUrl, targetTitle) => {
+    const clicked = await page.evaluate(`((targetJobId, targetUrl, targetTitle, targetIndex) => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
         const cleanTitle = norm(targetTitle);
-        let card = null;
 
+        function clickElement(el) {
+            if (!el) return false;
+            try { el.scrollIntoView({ behavior: 'auto', block: 'center' }); } catch {}
+            try { el.focus?.(); } catch {}
+            const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
+            try {
+                if (typeof PointerEvent !== 'undefined') {
+                    el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
+                }
+            } catch {}
+            try { el.dispatchEvent(new MouseEvent('mousedown', mouseOpts)); } catch {}
+            try {
+                if (typeof PointerEvent !== 'undefined') {
+                    el.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
+                }
+            } catch {}
+            try { el.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch {}
+            try { el.click(); } catch {}
+            try { el.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch {}
+            return true;
+        }
+
+        // 1. First priority: Target the specific interactive element of each entry in semantic search:
+        // document.querySelector("#workspace ... div:nth-child(N) ... div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div")
+        if (typeof targetIndex === 'number' && targetIndex >= 0) {
+            const nthOdd = 2 * targetIndex + 1;
+            const nthDirect = targetIndex + 1;
+            const specificSelectors = [
+                '#workspace div.ckymge > div > div > div:nth-child(' + nthOdd + ') div.ckya1p.ckymt4 div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
+                '#workspace div.ckymge > div > div > div:nth-child(' + nthOdd + ') .ckya1p .ckya1x > div > div',
+                '#workspace div.ckymge > div > div > div:nth-child(' + nthOdd + ') div.ckya1x > div > div',
+                'div:nth-child(' + nthOdd + ') div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
+                '#workspace div.ckymge > div > div > div:nth-child(' + nthDirect + ') div.ckya1p.ckymt4 div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
+                '#workspace div.ckymge > div > div > div:nth-child(' + nthDirect + ') .ckya1p .ckya1x > div > div',
+                '#workspace div.ckymge > div > div > div:nth-child(' + nthDirect + ') div.ckya1x > div > div',
+                'div:nth-child(' + nthDirect + ') div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div'
+            ];
+            for (const sel of specificSelectors) {
+                const el = document.querySelector(sel);
+                if (el) return clickElement(el);
+            }
+
+            // Query all matching interactive elements in the search results list
+            const candidateLists = [
+                '#workspace div.ckymge > div > div > div div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
+                'div.ckya1p.ckymt4 div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
+                'div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
+                '.ckya1p .ckya1x > div > div',
+                '[class*="ckya1x"][class*="ckyipj"] > div > div',
+                '[class*="ckya1p"] [class*="ckya1x"] > div > div',
+                '[class*="ckya1x"] > div > div'
+            ];
+            for (const sel of candidateLists) {
+                const all = Array.from(document.querySelectorAll(sel));
+                if (all.length > 0 && targetIndex < all.length) {
+                    const el = all[targetIndex];
+                    if (el) return clickElement(el);
+                }
+            }
+        }
+
+        // 2. Second priority: Match card by jobId, URL, or title
+        let card = null;
         if (targetJobId) {
             const el = document.querySelector(
                 '[componentkey*="' + targetJobId + '"], ' +
@@ -629,7 +691,7 @@ async function clickJobCardInDom(page, job) {
                 'a[href*="/jobs/view/' + targetJobId + '"]'
             );
             if (el) {
-                card = el.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item') || el;
+                card = el.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, div:nth-child(n)') || el;
             }
         }
 
@@ -638,7 +700,7 @@ async function clickJobCardInDom(page, job) {
             const links = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
             const link = links.find(a => (a.href || '').split('?')[0] === cleanUrl);
             if (link) {
-                card = link.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item') || link;
+                card = link.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, div:nth-child(n)') || link;
             }
         }
 
@@ -651,15 +713,19 @@ async function clickJobCardInDom(page, job) {
 
         if (!card) return false;
 
+        // Check if card contains the specific semantic target
+        const specificInCard = card.querySelector('div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div, .ckya1p .ckya1x > div > div, [class*="ckya1x"] > div > div');
+        if (specificInCard) {
+            return clickElement(specificInCard);
+        }
+
         // Ensure card is the container element and not an anchor tag
         while (card && (card.tagName.toLowerCase() === 'a' || card.closest('a'))) {
             card = card.parentElement;
         }
         if (!card) return false;
 
-        // Choose a non-hyperlink element in the card: either the card container itself,
-        // or a non-link element inside it (such as the container div or info area),
-        // strictly avoiding any <a> tags so the browser does not navigate or open a new tab.
+        // Choose a non-hyperlink element in the card
         let clickable = card;
         const nonLinkCandidates = Array.from(card.querySelectorAll('div, p, span'));
         const nonLinkEl = nonLinkCandidates.find(el => !el.closest('a'));
@@ -667,18 +733,8 @@ async function clickJobCardInDom(page, job) {
             clickable = nonLinkEl;
         }
 
-        try { card.scrollIntoView({ behavior: 'auto', block: 'nearest' }); } catch {}
-        try { clickable.focus?.(); } catch {}
-        try { clickable.click(); } catch {}
-        try {
-            const opts = { bubbles: true, cancelable: true, view: window };
-            clickable.dispatchEvent(new MouseEvent('mousedown', opts));
-            clickable.dispatchEvent(new MouseEvent('mouseup', opts));
-            clickable.dispatchEvent(new MouseEvent('click', opts));
-        } catch {}
-
-        return true;
-    })(${JSON.stringify(jobId)}, ${JSON.stringify(job.url || '')}, ${JSON.stringify(job.title || '')})`);
+        return clickElement(clickable);
+    })(${JSON.stringify(jobId)}, ${JSON.stringify(job.url || '')}, ${JSON.stringify(job.title || '')}, ${Number(index)})`);
 
     return Boolean(clicked);
 }
@@ -690,17 +746,17 @@ async function extractJobDetailsFromDom(page) {
         const rightPane = document.querySelector(
             '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"]'
         ) || document;
-        const scope = rightPane && rightPane !== document
-            ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
-            : Array.from(document.querySelectorAll('div, section, article, main'));
-        const section = scope
-          .find(el => norm(el.querySelector('h1,h2,h3,h4, [class*="heading"], strong')?.textContent || '') === 'about the job');
-        const btn = [...(section?.querySelectorAll('button, a[role="button"]') || [])]
-          .find(el => /more/.test(norm(el.textContent || '')) || /more/.test(norm(el.getAttribute('aria-label') || '')));
-        if (btn) btn.click();
+
+        const buttons = Array.from(rightPane.querySelectorAll('button, a[role="button"], span[role="button"]'));
+        const moreBtn = buttons.find(b => {
+            const t = norm(b.textContent || '');
+            const aria = norm(b.getAttribute('aria-label') || '');
+            return /show more|see more|\\bmore\\b/i.test(t) || /show more|see more|\\bmore\\b/i.test(aria);
+        });
+        if (moreBtn) moreBtn.click();
     })()`);
 
-    await page.wait(0.5);
+    await page.wait(0.3);
 
     const detail = await page.evaluate(`(() => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim();
@@ -712,15 +768,40 @@ async function extractJobDetailsFromDom(page) {
             ? [rightPane, ...rightPane.querySelectorAll('div, section, article, main')]
             : Array.from(document.querySelectorAll('div, section, article, main'));
 
+        // 1. Search by heading "About the job" across any tag
         const candidates = scope
           .map(el => ({
-            heading: norm(el.querySelector('h1,h2,h3,h4, [class*="heading"], strong')?.textContent || ''),
+            heading: norm(el.querySelector('h1,h2,h3,h4,h5,h6, [class*="heading"], span, p, div, strong')?.textContent || ''),
             text: norm(el.innerText || el.textContent || ''),
           }))
           .filter(c => c.text && c.heading.toLowerCase() === 'about the job' && c.text.length > 'About the job'.length)
           .sort((a, b) => a.text.length - b.text.length);
 
         let description = candidates[0]?.text.replace(/^About the job\\s*/i, '') || '';
+
+        // 2. If no candidate found, search for any element containing "about the job" heading text
+        if (!description) {
+            const headingEl = Array.from(rightPane.querySelectorAll('h1,h2,h3,h4,h5,h6,span,p,div,strong,b'))
+                .find(el => {
+                    const t = norm(el.textContent || '').toLowerCase();
+                    return t === 'about the job' || t.startsWith('about the job');
+                });
+            if (headingEl) {
+                const parent = headingEl.closest('section, article, div') || headingEl.parentElement;
+                if (parent) {
+                    description = norm(parent.innerText || parent.textContent || '').replace(/^About the job\\s*/i, '');
+                }
+            }
+        }
+
+        // 3. Fallback to standard description container selectors
+        if (!description) {
+            const descEl = rightPane.querySelector('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
+            if (descEl) {
+                description = norm(descEl.innerText || descEl.textContent || '');
+            }
+        }
+
         description = description.replace(/Meet the hiring team[\\s\\S]*$/i, '').trim();
 
         const applyLink = [...rightPane.querySelectorAll('a[href]')]
@@ -751,18 +832,21 @@ async function enrichJobDetails(page, jobs) {
             let detail = null;
             let clicked = false;
             try {
-                clicked = await clickJobCardInDom(page, job);
+                clicked = await clickJobCardInDom(page, job, i);
             } catch {
                 clicked = false;
             }
 
             if (clicked) {
-                await page.wait(0.5);
-                await page.wait({ text: 'About the job', timeout: 3 }).catch(() => {});
-                detail = await extractJobDetailsFromDom(page);
+                // Poll right pane up to 3s for details to render in-place
+                for (let attempt = 0; attempt < 6; attempt++) {
+                    await page.wait(0.5);
+                    detail = await extractJobDetailsFromDom(page);
+                    if (detail?.description) break;
+                }
             }
 
-            // Fallback: If card was not in current DOM or click didn't yield a description, navigate directly to job.url
+            // Fallback: If card was not in current DOM or in-place loading did not yield a description
             if (!detail || !detail.description) {
                 await page.goto(job.url);
                 await assertLinkedInAuthenticated(page, 'LinkedIn job detail');

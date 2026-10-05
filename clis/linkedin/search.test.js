@@ -130,7 +130,7 @@ describe('linkedin enrichJobDetails (silent failure fix)', () => {
             }),
             wait: vi.fn(async () => undefined),
             evaluate: vi.fn(async (code) => {
-                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('clickJobCard'))) {
+                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('clickJobCard') || code.includes('targetIndex'))) {
                     return false;
                 }
                 const idx = evalCall++;
@@ -692,7 +692,7 @@ describe('linkedin enrichJobDetails with hiring_team', () => {
             goto: vi.fn().mockResolvedValue(undefined),
             wait: vi.fn().mockResolvedValue(undefined),
             evaluate: vi.fn(async (code) => {
-                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('clickJobCard'))) {
+                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('clickJobCard') || code.includes('targetIndex'))) {
                     return false;
                 }
                 if (typeof code === 'string' && code.includes('login__form')) {
@@ -747,6 +747,83 @@ describe('linkedin enrichJobDetails with hiring_team', () => {
 });
 
 describe('linkedin in-page job card clicking and details extraction', () => {
+    it('clicks the specific semantic entry element identified by the user to load details in-place', async () => {
+        const dom = new JSDOM(`
+            <div id="workspace">
+                <div>
+                    <div class="ckymz3 ckymz0 ckymz1 ckylrx ckyly1 ckymzs ckymzt ckymzu ckymzv ckymzw ckymf2 ckymf0 ckyigf ckya15 ckyhz8 ckymf3 ckymf6 ckymt4">
+                        <div>
+                            <div class="ckymge ckymgd ckygt0 ckya55 ckymgf ckymt4">
+                                <div>
+                                    <div>
+                                        <div class="entry-card-1">
+                                            <div>
+                                                <div>
+                                                    <div>
+                                                        <div class="ckya1p ckymt4">
+                                                            <div><div><div><div>
+                                                                <div class="ckya1x ckyipj ckyjp7 ckyien ckyisf ckyiuf ckymt4">
+                                                                    <div>
+                                                                        <div id="clickable-entry-1">Entry 1 Content</div>
+                                                                    </div>
+                                                                </div>
+                                                            </div></div></div></div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="jobs-search__job-details--container">
+                <span class="about-title">About the job</span>
+                <p>Cloud and DevOps Engineer details in-place.</p>
+                <a href="https://example.com/apply/inplace">Apply inplace</a>
+                <div role="alert" title="Meet the hiring team">
+                    <a href="https://www.linkedin.com/in/hiring-manager">Jane Manager</a>
+                    <div>Engineering Lead</div>
+                </div>
+            </div>
+        `);
+
+        let targetClicked = false;
+        const targetEl = dom.window.document.querySelector('#clickable-entry-1');
+        targetEl.addEventListener('click', () => { targetClicked = true; });
+
+        const page = {
+            goto: vi.fn().mockResolvedValue(undefined),
+            wait: vi.fn().mockResolvedValue(undefined),
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+        };
+
+        const [enriched] = await enrichJobDetails(page, [
+            {
+                rank: 1,
+                title: 'Senior DevOps Specialist',
+                company: 'CloudCo',
+                url: 'https://www.linkedin.com/jobs/view/123456',
+            },
+        ]);
+
+        expect(page.goto).not.toHaveBeenCalled();
+        expect(targetClicked).toBe(true);
+        expect(enriched.description).toContain('Cloud and DevOps Engineer details in-place.');
+        expect(enriched.apply_url).toBe('https://example.com/apply/inplace');
+        expect(enriched.hiring_team).toMatchObject({
+            name: 'Jane Manager',
+            title: 'Engineering Lead',
+        });
+        expect(enriched.detail_error).toBeNull();
+    });
+
     it('clicks the non-hyperlink part of the job entry card in the DOM and extracts right-side details without calling page.goto or clicking the title link', async () => {
         const dom = new JSDOM(`
             <div componentkey="job-card-component-ref-4375836267" class="job-card-container">
@@ -819,7 +896,7 @@ describe('linkedin in-page job card clicking and details extraction', () => {
             goto: vi.fn().mockResolvedValue(undefined),
             wait: vi.fn().mockResolvedValue(undefined),
             evaluate: vi.fn(async (code) => {
-                if (typeof code === 'string' && code.includes('targetJobId')) {
+                if (typeof code === 'string' && (code.includes('targetJobId') || code.includes('targetIndex'))) {
                     // Card not in DOM
                     return false;
                 }
