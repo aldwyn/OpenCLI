@@ -805,7 +805,7 @@ async function extractJobDetailsFromDom(page) {
             if (!btn) return false;
             try { btn.scrollIntoView({ behavior: 'auto', block: 'center' }); } catch {}
             try { btn.focus?.(); } catch {}
-            const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
+            const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1, detail: 1 };
             try {
                 if (typeof PointerEvent !== 'undefined') {
                     btn.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
@@ -818,8 +818,11 @@ async function extractJobDetailsFromDom(page) {
                 }
             } catch {}
             try { btn.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch {}
-            try { btn.click(); } catch {}
-            try { btn.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch {}
+            try {
+                btn.click();
+            } catch {
+                try { btn.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch {}
+            }
             return true;
         }
 
@@ -827,6 +830,9 @@ async function extractJobDetailsFromDom(page) {
             if (!el) return false;
             // Exclude header, navigation, and filter bar buttons
             if (el.closest('header, nav, [role="navigation"], [class*="filter"], [aria-label*="filter"]')) return false;
+
+            const testId = el.getAttribute('data-testid') || '';
+            if (testId === 'expandable-text-button' || testId.includes('expandable-text')) return true;
 
             const t = norm(el.textContent || '');
             const aria = norm(el.getAttribute('aria-label') || '');
@@ -839,7 +845,16 @@ async function extractJobDetailsFromDom(page) {
             return pattern.test(t) || pattern.test(aria);
         }
 
-        // 1. Look inside the resolved details pane or "About the job" container
+        // 1. Highest priority: Target standard LinkedIn expandable text buttons directly
+        const testIdButtons = Array.from(document.querySelectorAll(
+            'button[data-testid="expandable-text-button"], [data-testid="expandable-text-button"], button[data-testid*="expandable-text"], [data-testid*="expandable-text"], button.inline-show-more-text__button, button.show-more-less-html__button'
+        )).filter(b => !b.closest('header, nav, [role="navigation"], [class*="filter"], [aria-label*="filter"]'));
+
+        for (const btn of testIdButtons) {
+            if (clickBtn(btn)) return true;
+        }
+
+        // 2. Look inside the resolved details pane or "About the job" container
         let detailsPane = document.querySelector(
             '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"], #job-details, .jobs-description'
         );
@@ -852,19 +867,20 @@ async function extractJobDetailsFromDom(page) {
             });
             if (aboutHeading) {
                 detailsPane = aboutHeading.closest('section, article, div[class*="detail"], div[class*="description"]') || 
+                              aboutHeading.parentElement?.parentElement?.parentElement ||
                               aboutHeading.parentElement?.parentElement || 
                               aboutHeading.parentElement;
             }
         }
 
         if (detailsPane) {
-            const buttons = Array.from(detailsPane.querySelectorAll('button, a[role="button"], span[role="button"], [class*="show-more"], [class*="see-more"], span, a'));
+            const buttons = Array.from(detailsPane.querySelectorAll('button, a[role="button"], span[role="button"], [class*="show-more"], [class*="see-more"]'));
             const moreBtn = buttons.find(isTargetMoreButton);
             if (moreBtn && clickBtn(moreBtn)) return true;
         }
 
-        // 2. If not found in detailsPane, search for any explicit "...more" or "…more" button near the job description
-        const allCandidates = Array.from(document.querySelectorAll('button, a[role="button"], span[role="button"], [class*="show-more"], [class*="see-more"], span, a'));
+        // 3. Fallback: search document for explicit "...more" or "…more" button near the job description
+        const allCandidates = Array.from(document.querySelectorAll('button, a[role="button"], span[role="button"], [class*="show-more"], [class*="see-more"]'));
         const directMoreBtn = allCandidates.find(el => {
             const t = norm(el.textContent || '');
             const aria = norm(el.getAttribute('aria-label') || '');
@@ -880,7 +896,7 @@ async function extractJobDetailsFromDom(page) {
         }
     })()`);
 
-    await page.wait(0.3);
+    await page.wait(0.5);
 
     const detail = await page.evaluate(`(() => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim();
@@ -896,6 +912,7 @@ async function extractJobDetailsFromDom(page) {
             });
             if (aboutHeading) {
                 rightPane = aboutHeading.closest('section, article, div[class*="detail"], div[class*="description"]') || 
+                            aboutHeading.parentElement?.parentElement?.parentElement ||
                             aboutHeading.parentElement?.parentElement || 
                             aboutHeading.parentElement;
             }
@@ -933,13 +950,17 @@ async function extractJobDetailsFromDom(page) {
 
         // 3. Fallback to standard description container selectors
         if (!description) {
-            const descEl = rightPane.querySelector('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
+            const descEl = rightPane?.querySelector?.('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
             if (descEl) {
                 description = norm(descEl.innerText || descEl.textContent || '');
             }
         }
 
-        description = description.replace(/Meet the hiring team[\\s\\S]*$/i, '').trim();
+        description = description
+            .replace(/Meet the hiring team[\\s\\S]*$/i, '')
+            .replace(/\\s*(?:(?:\\.{3}|…)\\s*)?(?:show\\s+more|see\\s+more|show\\s+less|see\\s+less|more|less)\\s*$/i, '')
+            .replace(/\\s*(?:\\.{3}|…)\\s*$/i, '')
+            .trim();
 
         const applyLink = [...rightPane.querySelectorAll('a[href]')]
           .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))

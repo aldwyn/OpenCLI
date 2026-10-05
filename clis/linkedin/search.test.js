@@ -1055,6 +1055,43 @@ describe('linkedin in-page job card clicking and details extraction', () => {
 
         expect(unicodeMoreClicked).toBe(true);
     });
+
+    it('clicks button with data-testid="expandable-text-button" to expand job details and cleans trailing more', async () => {
+        const dom = new JSDOM(`
+            <div class="semantic-details-pane">
+                <h2>About the job</h2>
+                <div class="job-details-content">
+                    <p>
+                        Senior DevOps Engineer with AWS experience.
+                        <button class="ckymsq ckymst" type="button" aria-hidden="true" data-testid="expandable-text-button" style="display: inline-block;">
+                            <span style="white-space: nowrap;"><span><span>…</span><span> more</span></span></span>
+                        </button>
+                    </p>
+                </div>
+            </div>
+        `);
+
+        let expandableClicked = false;
+        const btn = dom.window.document.querySelector('button[data-testid="expandable-text-button"]');
+        btn.addEventListener('click', () => {
+            expandableClicked = true;
+            btn.remove();
+        });
+
+        const page = {
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+        };
+
+        const result = await extractJobDetailsFromDom(page);
+
+        expect(expandableClicked).toBe(true);
+        expect(result.description).not.toMatch(/more$/i);
+        expect(result.description).toContain('Senior DevOps Engineer with AWS experience.');
+    });
 });
 
 
