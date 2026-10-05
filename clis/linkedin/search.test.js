@@ -997,6 +997,64 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(moreFiltersClicked).toBe(false);
         expect(showMoreClicked).toBe(true);
     });
+
+    it('clicks "...more" button to expand full job description', async () => {
+        const dom = new JSDOM(`
+            <div class="semantic-details-pane">
+                <h2>About the job</h2>
+                <div class="job-details-content">
+                    <p>Short snippet of AWS DevOps role</p>
+                    <button id="ellipsis-more-btn" class="inline-show-more-text__button">...more</button>
+                </div>
+            </div>
+        `);
+
+        let ellipsisMoreClicked = false;
+        dom.window.document.querySelector('#ellipsis-more-btn').addEventListener('click', () => {
+            ellipsisMoreClicked = true;
+        });
+
+        const page = {
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+        };
+
+        await extractJobDetailsFromDom(page);
+
+        expect(ellipsisMoreClicked).toBe(true);
+    });
+
+    it('clicks "…more" (unicode ellipsis) button to expand full job description', async () => {
+        const dom = new JSDOM(`
+            <div class="semantic-details-pane">
+                <h2>About the job</h2>
+                <div class="job-details-content">
+                    <p>Short snippet of AWS DevOps role</p>
+                    <button id="unicode-more-btn" class="inline-show-more-text__button">…more</button>
+                </div>
+            </div>
+        `);
+
+        let unicodeMoreClicked = false;
+        dom.window.document.querySelector('#unicode-more-btn').addEventListener('click', () => {
+            unicodeMoreClicked = true;
+        });
+
+        const page = {
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+        };
+
+        await extractJobDetailsFromDom(page);
+
+        expect(unicodeMoreClicked).toBe(true);
+    });
 });
 
 

@@ -797,10 +797,49 @@ async function clickJobCardInDom(page, job, index = 0) {
 }
 
 async function extractJobDetailsFromDom(page) {
-    // Expand "Show more" button if present
+    // Expand "...more" / "Show more" button if present to reveal full "About the job" details
     await page.evaluate(`(() => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-        
+
+        function clickBtn(btn) {
+            if (!btn) return false;
+            try { btn.scrollIntoView({ behavior: 'auto', block: 'center' }); } catch {}
+            try { btn.focus?.(); } catch {}
+            const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
+            try {
+                if (typeof PointerEvent !== 'undefined') {
+                    btn.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
+                }
+            } catch {}
+            try { btn.dispatchEvent(new MouseEvent('mousedown', mouseOpts)); } catch {}
+            try {
+                if (typeof PointerEvent !== 'undefined') {
+                    btn.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
+                }
+            } catch {}
+            try { btn.dispatchEvent(new MouseEvent('mouseup', mouseOpts)); } catch {}
+            try { btn.click(); } catch {}
+            try { btn.dispatchEvent(new MouseEvent('click', mouseOpts)); } catch {}
+            return true;
+        }
+
+        function isTargetMoreButton(el) {
+            if (!el) return false;
+            // Exclude header, navigation, and filter bar buttons
+            if (el.closest('header, nav, [role="navigation"], [class*="filter"], [aria-label*="filter"]')) return false;
+
+            const t = norm(el.textContent || '');
+            const aria = norm(el.getAttribute('aria-label') || '');
+
+            // Explicitly reject filters and "learn more" buttons
+            if (/filter|learn\\s*more/i.test(t) || /filter|learn\\s*more/i.test(aria)) return false;
+
+            // Match "...more", "…more", "... more", "… more", "show more", "see more", or "...see more"
+            const pattern = /^(?:(?:\\.{3}|…)\\s*)?(?:show\\s+more|see\\s+more|more)(?:\\s+.*)?$/i;
+            return pattern.test(t) || pattern.test(aria);
+        }
+
+        // 1. Look inside the resolved details pane or "About the job" container
         let detailsPane = document.querySelector(
             '.jobs-search__job-details--container, .jobs-search-results-list__details, .jobs-details, [class*="job-details--container"], [class*="jobs-details"], [class*="job-view-layout"], #job-details, .jobs-description'
         );
@@ -819,15 +858,25 @@ async function extractJobDetailsFromDom(page) {
         }
 
         if (detailsPane) {
-            const buttons = Array.from(detailsPane.querySelectorAll('button, a[role="button"], span[role="button"]'));
-            const moreBtn = buttons.find(b => {
-                if (b.closest('header, nav, [role="navigation"], [class*="filter"], [aria-label*="filter"]')) return false;
-                const t = norm(b.textContent || '');
-                const aria = norm(b.getAttribute('aria-label') || '');
-                if (/filter|learn\\s*more/i.test(t) || /filter|learn\\s*more/i.test(aria)) return false;
-                return /^(?:show\\s+more|see\\s+more)(?:\\s+.*)?$/i.test(t) || /^(?:show\\s+more|see\\s+more)(?:\\s+.*)?$/i.test(aria);
-            });
-            if (moreBtn) moreBtn.click();
+            const buttons = Array.from(detailsPane.querySelectorAll('button, a[role="button"], span[role="button"], [class*="show-more"], [class*="see-more"], span, a'));
+            const moreBtn = buttons.find(isTargetMoreButton);
+            if (moreBtn && clickBtn(moreBtn)) return true;
+        }
+
+        // 2. If not found in detailsPane, search for any explicit "...more" or "…more" button near the job description
+        const allCandidates = Array.from(document.querySelectorAll('button, a[role="button"], span[role="button"], [class*="show-more"], [class*="see-more"], span, a'));
+        const directMoreBtn = allCandidates.find(el => {
+            const t = norm(el.textContent || '');
+            const aria = norm(el.getAttribute('aria-label') || '');
+            const isEllipsisMore = /^(?:\\.{3}|…)\\s*(?:more|see\\s+more|show\\s+more)$/i.test(t) || 
+                                   /^(?:\\.{3}|…)\\s*(?:more|see\\s+more|show\\s+more)$/i.test(aria);
+            if (!isEllipsisMore) return false;
+            if (el.closest('header, nav, [role="navigation"], [class*="filter"], [aria-label*="filter"]')) return false;
+            return true;
+        });
+
+        if (directMoreBtn) {
+            clickBtn(directMoreBtn);
         }
     })()`);
 
