@@ -782,29 +782,21 @@ describe('linkedin enrichJobDetails with hiring_team', () => {
 });
 
 describe('linkedin in-page job card clicking and details extraction', () => {
-    it('clicks the specific semantic entry element identified by the user to load details in-place', async () => {
+    it('clicks the non-hyperlink card entry container in workspace list hierarchy to load details in-place', async () => {
         const dom = new JSDOM(`
             <div id="workspace">
-                <div>
-                    <div class="ckymz3 ckymz0 ckymz1 ckylrx ckyly1 ckymzs ckymzt ckymzu ckymzv ckymzw ckymf2 ckymf0 ckyigf ckya15 ckyhz8 ckymf3 ckymf6 ckymt4">
-                        <div>
-                            <div class="ckymge ckymgd ckygt0 ckya55 ckymgf ckymt4">
-                                <div>
-                                    <div>
-                                        <div class="entry-card-1">
-                                            <div>
-                                                <div>
-                                                    <div>
-                                                        <div class="ckya1p ckymt4">
-                                                            <div><div><div><div>
-                                                                <div class="ckya1x ckyipj ckyjp7 ckyien ckyisf ckyiuf ckymt4">
-                                                                    <div>
-                                                                        <div id="clickable-entry-1">Entry 1 Content</div>
-                                                                    </div>
-                                                                </div>
-                                                            </div></div></div></div>
-                                                        </div>
-                                                    </div>
+                <div class="workspace-main">
+                    <div class="search-layout">
+                        <div class="results-list-container">
+                            <div class="results-list">
+                                <div class="entry-card-1">
+                                    <div class="entry-card-wrapper">
+                                        <div class="entry-card-container">
+                                            <a href="/jobs/view/123456" class="job-card-title">Senior DevOps Specialist</a>
+                                            <div class="entry-card-content">
+                                                <div id="clickable-entry-1">
+                                                    <p>CloudCo</p>
+                                                    <p>Sydney, NSW</p>
                                                 </div>
                                             </div>
                                         </div>

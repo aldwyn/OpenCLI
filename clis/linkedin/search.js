@@ -660,48 +660,76 @@ async function clickJobCardInDom(page, job, index = 0) {
             return true;
         }
 
-        // 1. First priority: Target the specific interactive element of each entry in semantic search:
-        // document.querySelector("#workspace ... div:nth-child(N) ... div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div")
-        if (typeof targetIndex === 'number' && targetIndex >= 0) {
-            const nthOdd = 2 * targetIndex + 1;
-            const nthDirect = targetIndex + 1;
-            const specificSelectors = [
-                '#workspace div.ckymge > div > div > div:nth-child(' + nthOdd + ') div.ckya1p.ckymt4 div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
-                '#workspace div.ckymge > div > div > div:nth-child(' + nthOdd + ') .ckya1p .ckya1x > div > div',
-                '#workspace div.ckymge > div > div > div:nth-child(' + nthOdd + ') div.ckya1x > div > div',
-                'div:nth-child(' + nthOdd + ') div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
-                '#workspace div.ckymge > div > div > div:nth-child(' + nthDirect + ') div.ckya1p.ckymt4 div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
-                '#workspace div.ckymge > div > div > div:nth-child(' + nthDirect + ') .ckya1p .ckya1x > div > div',
-                '#workspace div.ckymge > div > div > div:nth-child(' + nthDirect + ') div.ckya1x > div > div',
-                'div:nth-child(' + nthDirect + ') div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div'
-            ];
-            for (const sel of specificSelectors) {
-                const el = document.querySelector(sel);
-                if (el) return clickElement(el);
+        // Helper to check if a card element matches the target job
+        function matchesTarget(cardEl) {
+            if (!cardEl) return false;
+            if (targetJobId) {
+                if (cardEl.getAttribute('componentkey')?.includes(targetJobId)) return true;
+                if (cardEl.getAttribute('data-job-id') === targetJobId) return true;
+                if (cardEl.getAttribute('data-occludable-job-id') === targetJobId) return true;
+                if (cardEl.querySelector('a[href*="/jobs/view/' + targetJobId + '"]')) return true;
             }
+            if (targetUrl) {
+                const cleanUrl = targetUrl.split('?')[0];
+                const links = Array.from(cardEl.querySelectorAll('a[href*="/jobs/view/"]'));
+                if (links.some(a => (a.href || '').split('?')[0] === cleanUrl)) return true;
+            }
+            if (cleanTitle) {
+                const text = norm(cardEl.textContent || '');
+                if (text && text.includes(cleanTitle)) return true;
+            }
+            return false;
+        }
 
-            // Query all matching interactive elements in the search results list
-            const candidateLists = [
-                '#workspace div.ckymge > div > div > div div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
-                'div.ckya1p.ckymt4 div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
-                'div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div',
-                '.ckya1p .ckya1x > div > div',
-                '[class*="ckya1x"][class*="ckyipj"] > div > div',
-                '[class*="ckya1p"] [class*="ckya1x"] > div > div',
-                '[class*="ckya1x"] > div > div'
-            ];
-            for (const sel of candidateLists) {
-                const all = Array.from(document.querySelectorAll(sel));
-                if (all.length > 0 && targetIndex < all.length) {
-                    const el = all[targetIndex];
-                    if (el) return clickElement(el);
+        // 1. Gather all job card containers present in the DOM (in document order: top to bottom)
+        const standardCardSelector = [
+            '[componentkey^="job-card-component-ref-"]',
+            '[data-occludable-job-id]',
+            '[data-job-id]',
+            'div.job-card-container',
+            'li.jobs-search-results__list-item',
+            '.jobs-search-results-list ul > li',
+            'ul.jobs-search__results-list > li'
+        ].join(', ');
+
+        let cards = Array.from(document.querySelectorAll(standardCardSelector));
+
+        // If no standard card classes are found, derive cards from all job view links in the list
+        if (cards.length === 0) {
+            const allJobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
+            const cardSet = new Set();
+            for (const link of allJobLinks) {
+                // Ascend to find the list-item container for this link
+                let cur = link.parentElement;
+                let candidate = null;
+                while (cur && cur !== document.body && !cur.matches('#workspace, main, section')) {
+                    const parent = cur.parentElement;
+                    if (parent) {
+                        const siblingJobCount = Array.from(parent.children).filter(child => child.querySelector('a[href*="/jobs/view/"]')).length;
+                        if (siblingJobCount > 1) {
+                            candidate = cur;
+                            break;
+                        }
+                    }
+                    cur = cur.parentElement;
+                }
+                const found = candidate || link.closest('li') || link.parentElement;
+                if (found && !cardSet.has(found)) {
+                    cardSet.add(found);
+                    cards.push(found);
                 }
             }
         }
 
-        // 2. Second priority: Match card by jobId, URL, or title
-        let card = null;
-        if (targetJobId) {
+        // 2. Locate the specific card: match by ID/URL/title first, then fallback to top-to-bottom index
+        let card = cards.find(matchesTarget);
+
+        if (!card && typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < cards.length) {
+            card = cards[targetIndex];
+        }
+
+        // 3. Fallback direct query if not matched in cards list
+        if (!card && targetJobId) {
             const el = document.querySelector(
                 '[componentkey*="' + targetJobId + '"], ' +
                 '[data-job-id="' + targetJobId + '"], ' +
@@ -709,7 +737,7 @@ async function clickJobCardInDom(page, job, index = 0) {
                 'a[href*="/jobs/view/' + targetJobId + '"]'
             );
             if (el) {
-                card = el.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, div:nth-child(n)') || el;
+                card = el.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, li') || el.parentElement;
             }
         }
 
@@ -718,38 +746,49 @@ async function clickJobCardInDom(page, job, index = 0) {
             const links = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
             const link = links.find(a => (a.href || '').split('?')[0] === cleanUrl);
             if (link) {
-                card = link.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, div:nth-child(n)') || link;
+                card = link.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, li') || link.parentElement;
             }
         }
 
         if (!card && cleanTitle) {
-            const cardCandidates = Array.from(document.querySelectorAll(
-                '[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], div.job-card-container, li.jobs-search-results__list-item'
-            ));
-            card = cardCandidates.find(c => norm(c.textContent || '').includes(cleanTitle)) || null;
+            const allEls = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
+                const t = norm(el.textContent || '');
+                return t && t.includes(cleanTitle) && el.querySelector('a[href*="/jobs/view/"]');
+            });
+            if (allEls.length > 0) {
+                card = allEls[0];
+            }
         }
 
         if (!card) return false;
 
-        // Check if card contains the specific semantic target
-        const specificInCard = card.querySelector('div.ckya1x.ckyipj.ckyjp7.ckyien.ckyisf.ckyiuf.ckymt4 > div > div, .ckya1p .ckya1x > div > div, [class*="ckya1x"] > div > div');
-        if (specificInCard) {
-            return clickElement(specificInCard);
-        }
-
-        // Ensure card is the container element and not an anchor tag
+        // Ensure card itself is not an anchor tag
         while (card && (card.tagName.toLowerCase() === 'a' || card.closest('a'))) {
             card = card.parentElement;
         }
         if (!card) return false;
 
-        // Choose a non-hyperlink element in the card
-        let clickable = card;
-        const nonLinkCandidates = Array.from(card.querySelectorAll('div, p, span'));
-        const nonLinkEl = nonLinkCandidates.find(el => !el.closest('a'));
-        if (nonLinkEl) {
-            clickable = nonLinkEl;
+        // 4. Find the non-hyperlink entry div at that level to click:
+        // Exclude all anchors and buttons so we do not open new tabs or trigger actions (like Save)
+        const nonLinkDivs = Array.from(card.querySelectorAll('div')).filter(d => {
+            return !d.closest('a') && !d.closest('button, [role="button"]');
+        });
+
+        let clickable = null;
+        if (nonLinkDivs.length > 0) {
+            // Find the deepest inner container div that has content (the entry card body / content wrapper)
+            const contentDivs = nonLinkDivs.filter(d => {
+                const text = (d.textContent || '').trim();
+                return text.length > 0 && d.children.length > 0;
+            });
+            clickable = contentDivs.length > 0 ? contentDivs[contentDivs.length - 1] : nonLinkDivs[nonLinkDivs.length - 1];
         }
+
+        if (!clickable && !card.closest('a') && !card.closest('button, [role="button"]') && card.tagName.toLowerCase() !== 'a') {
+            clickable = card;
+        }
+
+        if (!clickable) return false;
 
         return clickElement(clickable);
     })(${JSON.stringify(jobId)}, ${JSON.stringify(job.url || '')}, ${JSON.stringify(job.title || '')}, ${Number(index)})`);
