@@ -217,16 +217,6 @@ describe('linkedin search URL builder (semantic search)', () => {
         );
     });
 
-    it('includes location when provided', () => {
-        const url = buildJobSearchUrl({
-            keywords: 'aws devops',
-            location: 'Australia',
-            referralSearchId: 'uzo1ol6xZOlWpgHn0cy4Vw==',
-        });
-        expect(url).toBe(
-            'https://www.linkedin.com/jobs/search-results/?keywords=aws+devops&location=Australia&origin=JOB_SEARCH_PAGE_JOB_FILTER&referralSearchId=uzo1ol6xZOlWpgHn0cy4Vw%3D%3D'
-        );
-    });
 
     it('generates a fresh referralSearchId if none is provided', () => {
         const url = buildJobSearchUrl({ keywords: 'software engineer' });
@@ -382,14 +372,8 @@ describe('linkedin fetchJobCards fallback to DOM', () => {
 
         const input = {
             keywords: 'aws devops',
-            location: 'Australia',
             limit: 10,
             start: 0,
-            companyIds: [],
-            experienceLevels: [],
-            jobTypes: [],
-            datePostedValues: [],
-            remoteTypes: [],
         };
 
         const jobs = await fetchJobCards(page, input);
@@ -426,14 +410,8 @@ describe('linkedin fetchJobCards fallback to DOM', () => {
 
         const input = {
             keywords: 'aws devops',
-            location: 'Australia',
             limit: 5,
             start: 0,
-            companyIds: [],
-            experienceLevels: [],
-            jobTypes: [],
-            datePostedValues: [],
-            remoteTypes: [],
         };
 
         const jobs = await fetchJobCards(page, input);
@@ -507,7 +485,6 @@ describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', (
 
         const jobs = await fetchJobCardsFromDom(page, {
             keywords: 'devops',
-            location: 'Australia',
             limit: 30,
             start: 0,
         });
@@ -535,7 +512,6 @@ describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', (
 
         const jobs = await fetchJobCardsFromDom(page, {
             keywords: 'devops',
-            location: 'Australia',
             limit: 5,
             start: 10,
         });
@@ -552,7 +528,6 @@ describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', (
 
         const jobs = await fetchJobCardsFromDom(page, {
             keywords: 'devops',
-            location: 'Australia',
             limit: 50,
             start: 0,
         });
@@ -582,7 +557,6 @@ describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', (
 
         const jobs = await fetchJobCardsFromDom(page, {
             keywords: 'devops',
-            location: 'Australia',
             limit: 2,
             start: 0,
             includeDetails: true,

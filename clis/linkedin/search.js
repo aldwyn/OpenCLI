@@ -50,9 +50,6 @@ function generateReferralSearchId() {
 function buildJobSearchUrl(input) {
     const searchParams = new URLSearchParams();
     searchParams.set('keywords', input.keywords);
-    if (input.location) {
-        searchParams.set('location', input.location);
-    }
     searchParams.set('origin', 'JOB_SEARCH_PAGE_JOB_FILTER');
     searchParams.set('referralSearchId', input.referralSearchId || generateReferralSearchId());
     const startNum = Number(input.start);
@@ -149,15 +146,6 @@ function resolveOutputFormat(kwargs) {
 function resolveOutputFile(kwargs) {
     if (kwargs?.output) return String(kwargs.output);
     if (kwargs?.file) return String(kwargs.file);
-    for (let i = 0; i < process.argv.length; i++) {
-        const arg = process.argv[i];
-        if ((arg === '-o' || arg === '--output' || arg === '--file') && process.argv[i + 1]) {
-            return process.argv[i + 1];
-        }
-        if (arg.startsWith('--output=')) return arg.slice('--output='.length);
-        if (arg.startsWith('--file=')) return arg.slice('--file='.length);
-        if (arg.startsWith('-o=')) return arg.slice('-o='.length);
-    }
     return null;
 }
 
@@ -846,8 +834,7 @@ async function extractJobDetailsFromDom(page) {
 
         description = description
             .replace(/Meet the hiring team[\\s\\S]*$/i, '')
-            .replace(/\\s*(?:(?:\\.{3}|…)\\s*)?(?:show\\s+more|see\\s+more|show\\s+less|see\\s+less|more|less)\\s*$/i, '')
-            .replace(/\\s*(?:\\.{3}|…)\\s*$/i, '')
+            .replace(/\\s*(?:(?:\\.{3}|…)\\s*)?(?:show\\s+more|see\\s+more|show\\s+less|see\\s+less|more|less|\\.{3}|…)\\s*$/i, '')
             .trim();
 
         const applyContainer = rightPane || document;
@@ -985,8 +972,11 @@ cli({
         };
 
         const options = {
-            onDetailFetched: (rankedJob) => {
+            onDetailFetched: (job, index) => {
                 if (streamWriter) {
+                    const rankedJob = ('rank' in job)
+                        ? job
+                        : { rank: input.start + (index ?? 0) + 1, ...job };
                     streamWriter.writeRow(rankedJob);
                 }
             },
@@ -996,31 +986,10 @@ cli({
             const data = await fetchJobCards(page, input, options);
             if (!includeDetails)
                 return data;
-            if (data.length > 0 && 'description' in data[0]) {
-                if (streamWriter) {
-                    streamWriter.close();
-                    return streamWriter.writeToStdout ? null : data;
-                }
-                return data;
-            }
-
-            const enriched = await enrichJobDetails(page, data, {
-                onDetailFetched: (job, index) => {
-                    const rankedJob = {
-                        rank: input.start + index + 1,
-                        ...job,
-                    };
-                    if (streamWriter) {
-                        streamWriter.writeRow(rankedJob);
-                    }
-                },
-            });
-
-            if (streamWriter) {
-                streamWriter.close();
-                return streamWriter.writeToStdout ? null : enriched;
-            }
-            return enriched;
+            const results = (data[0] && 'description' in data[0])
+                ? data
+                : await enrichJobDetails(page, data, options);
+            return streamWriter?.writeToStdout ? null : results;
         } finally {
             if (streamWriter) {
                 streamWriter.close();
