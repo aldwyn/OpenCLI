@@ -1092,6 +1092,29 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(result.description).not.toMatch(/more$/i);
         expect(result.description).toContain('Senior DevOps Engineer with AWS experience.');
     });
+
+    it('does not throw TypeError when rightPane is null or details are not yet loaded', async () => {
+        const dom = new JSDOM(`
+            <div class="search-results-only">
+                <p>Waiting for user to select a job...</p>
+            </div>
+        `);
+
+        const page = {
+            evaluate: vi.fn(async (code) => {
+                const fn = new Function('document', 'window', `return ${code}`);
+                return fn(dom.window.document, dom.window);
+            }),
+            wait: vi.fn().mockResolvedValue(undefined),
+        };
+
+        const result = await extractJobDetailsFromDom(page);
+
+        expect(result).toBeDefined();
+        expect(result.description).toBe('');
+        expect(result.applyUrl).toBe('');
+        expect(result.hiringTeam).toBeNull();
+    });
 });
 
 

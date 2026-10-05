@@ -950,7 +950,7 @@ async function extractJobDetailsFromDom(page) {
 
         // 3. Fallback to standard description container selectors
         if (!description) {
-            const descEl = rightPane?.querySelector?.('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
+            const descEl = (rightPane || document).querySelector?.('#job-details, .jobs-description__content, .jobs-box__html-content, [class*="jobs-description"]');
             if (descEl) {
                 description = norm(descEl.innerText || descEl.textContent || '');
             }
@@ -962,7 +962,8 @@ async function extractJobDetailsFromDom(page) {
             .replace(/\\s*(?:\\.{3}|…)\\s*$/i, '')
             .trim();
 
-        const applyLink = [...rightPane.querySelectorAll('a[href]')]
+        const applyContainer = rightPane || document;
+        const applyLink = [...(applyContainer?.querySelectorAll?.('a[href]') || [])]
           .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
           .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
 
