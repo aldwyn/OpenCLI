@@ -1,76 +1,21 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import yaml from 'js-yaml';
 import { cli, Strategy } from '@jackwener/opencli/registry';
-import { ArgumentError, AuthRequiredError, CommandExecutionError } from '@jackwener/opencli/errors';
+import { ArgumentError, AuthRequiredError } from '@jackwener/opencli/errors';
+
 const LINKEDIN_DOMAIN = 'linkedin.com';
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 100;
 const MIN_START = 0;
-// ── Filter value mappings ──────────────────────────────────────────────
-const EXPERIENCE_LEVELS = {
-    internship: '1',
-    entry: '2',
-    'entry-level': '2',
-    associate: '3',
-    mid: '4',
-    senior: '4',
-    'mid-senior': '4',
-    'mid-senior-level': '4',
-    director: '5',
-    executive: '6',
-};
-const JOB_TYPES = {
-    'full-time': 'F',
-    fulltime: 'F',
-    full: 'F',
-    'part-time': 'P',
-    parttime: 'P',
-    part: 'P',
-    contract: 'C',
-    temporary: 'T',
-    temp: 'T',
-    volunteer: 'V',
-    internship: 'I',
-    other: 'O',
-};
-const DATE_POSTED = {
-    any: 'on',
-    month: 'r2592000',
-    'past-month': 'r2592000',
-    week: 'r604800',
-    'past-week': 'r604800',
-    day: 'r86400',
-    '24h': 'r86400',
-    'past-24h': 'r86400',
-};
-const REMOTE_TYPES = {
-    onsite: '1',
-    'on-site': '1',
-    hybrid: '3',
-    remote: '2',
-};
+
 // ── Helpers ────────────────────────────────────────────────────────────
-function parseCsvArg(value) {
-    if (value === undefined || value === null || value === '')
-        return [];
-    return String(value)
-        .split(',')
-        .map(item => item.trim())
-        .filter(Boolean);
-}
-function mapFilterValues(input, mapping, label) {
-    const values = parseCsvArg(input);
-    const resolved = values.map(value => {
-        const key = value.toLowerCase();
-        const mapped = mapping[key];
-        if (!mapped)
-            throw new ArgumentError(`Unsupported ${label}: ${value}`);
-        return mapped;
-    });
-    return [...new Set(resolved)];
-}
+
 function normalizeWhitespace(value) {
     return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
+
 function parseIntegerArg(value, label, fallback, min, max = Infinity) {
     if (value === undefined || value === null || value === '')
         return fallback;
@@ -84,6 +29,7 @@ function parseIntegerArg(value, label, fallback, min, max = Infinity) {
     }
     return parsed;
 }
+
 function decodeLinkedinRedirect(url) {
     if (!url)
         return '';
@@ -96,9 +42,11 @@ function decodeLinkedinRedirect(url) {
     catch { }
     return url;
 }
+
 function generateReferralSearchId() {
     return randomBytes(16).toString('base64');
 }
+
 function buildJobSearchUrl(input) {
     const searchParams = new URLSearchParams();
     searchParams.set('keywords', input.keywords);
@@ -113,35 +61,16 @@ function buildJobSearchUrl(input) {
     }
     return `https://www.linkedin.com/jobs/search-results/?${searchParams.toString()}`;
 }
+
 function buildVoyagerSearchQuery(input) {
-    const hasFilters = input.companyIds.length ||
-        input.experienceLevels.length ||
-        input.jobTypes.length ||
-        input.datePostedValues.length ||
-        input.remoteTypes.length;
     const parts = [
-        'origin:' + (hasFilters ? 'JOB_SEARCH_PAGE_JOB_FILTER' : 'JOB_SEARCH_PAGE_OTHER_ENTRY'),
+        'origin:JOB_SEARCH_PAGE_OTHER_ENTRY',
         'keywords:' + input.keywords,
+        'spellCorrectionEnabled:true',
     ];
-    if (input.location) {
-        parts.push('locationUnion:(seoLocation:(location:' + input.location + '))');
-    }
-    const filters = [];
-    if (input.companyIds.length)
-        filters.push('company:List(' + input.companyIds.join(',') + ')');
-    if (input.experienceLevels.length)
-        filters.push('experience:List(' + input.experienceLevels.join(',') + ')');
-    if (input.jobTypes.length)
-        filters.push('jobType:List(' + input.jobTypes.join(',') + ')');
-    if (input.datePostedValues.length)
-        filters.push('timePostedRange:List(' + input.datePostedValues.join(',') + ')');
-    if (input.remoteTypes.length)
-        filters.push('workplaceType:List(' + input.remoteTypes.join(',') + ')');
-    if (filters.length)
-        parts.push('selectedFilters:(' + filters.join(',') + ')');
-    parts.push('spellCorrectionEnabled:true');
     return '(' + parts.join(',') + ')';
 }
+
 function buildVoyagerUrl(input, offset, count) {
     const params = new URLSearchParams({
         decorationId: 'com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollection-220',
@@ -155,6 +84,7 @@ function buildVoyagerUrl(input, offset, count) {
         .replace(/%29/gi, ')');
     return '/voyager/api/voyagerJobsDashJobCards?' + params.toString() + '&query=' + query + '&start=' + offset;
 }
+
 function looksLinkedInAuthWallText(value) {
     const text = String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
     if (!text)
@@ -164,6 +94,7 @@ function looksLinkedInAuthWallText(value) {
         /\b(captcha|verification required)\b/.test(text) ||
         /(请登录|登录领英|安全验证)/.test(text);
 }
+
 function buildLinkedInAuthProbeScript() {
     return `(() => {
       const text = [
@@ -174,188 +105,150 @@ function buildLinkedInAuthProbeScript() {
       return ${looksLinkedInAuthWallText.toString()}(text);
     })()`;
 }
+
 async function assertLinkedInAuthenticated(page, context) {
     const authRequired = await page.evaluate(buildLinkedInAuthProbeScript());
     if (authRequired) {
         throw new AuthRequiredError(LINKEDIN_DOMAIN, `${context} requires an active signed-in LinkedIn browser session`);
     }
 }
-// ── Company ID resolution (requires DOM interaction) ──────────────────
-async function resolveCompanyIds(page, input) {
-    const rawValues = parseCsvArg(input);
-    const ids = new Set();
-    const names = [];
-    for (const value of rawValues) {
-        if (/^\d+$/.test(value))
-            ids.add(value);
-        else
-            names.push(value);
+
+// ── Output Streaming (append to file/stdout immediately) ───────────────
+
+function resolveOutputFormat(kwargs) {
+    if (kwargs?.format && typeof kwargs.format === 'string') {
+        return kwargs.format.toLowerCase();
     }
-    if (!names.length)
-        return [...ids];
-    const resolved = await page.evaluate(`(async () => {
-    const targets = ${JSON.stringify(names)};
-    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-    const normalize = (v) => (v || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-
-    // Open "All filters" panel to expose company filter inputs
-    const allBtn = [...document.querySelectorAll('button')]
-      .find(b => ((b.innerText || '').trim().replace(/\\s+/g, ' ')) === 'All filters');
-    if (allBtn) { allBtn.click(); await sleep(300); }
-
-    const getCompanyMap = () => {
-      const map = {};
-      for (const el of document.querySelectorAll('input[name="company-filter-value"]')) {
-        const text = (el.parentElement?.innerText || el.closest('label')?.innerText || '')
-          .replace(/\\s+/g, ' ').trim().replace(/\\s*Filter by.*$/i, '').trim();
-        if (text) map[normalize(text)] = el.value;
-      }
-      return map;
-    };
-
-    const match = (map, name) => {
-      const n = normalize(name);
-      if (map[n]) return map[n];
-      const k = Object.keys(map).find(e => e === n || e.includes(n) || n.includes(e));
-      return k ? map[k] : null;
-    };
-
-    const results = {};
-    let map = getCompanyMap();
-
-    for (const name of targets) {
-      let found = match(map, name);
-      if (!found) {
-        const inp = [...document.querySelectorAll('input')]
-          .find(el => el.getAttribute('aria-label') === 'Add a company');
-        if (inp) {
-          inp.focus();
-          inp.value = name;
-          inp.dispatchEvent(new Event('input', { bubbles: true }));
-          inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
-          await sleep(1200);
-          map = getCompanyMap();
-          found = match(map, name);
-          inp.value = '';
-          inp.dispatchEvent(new Event('input', { bubbles: true }));
-          await sleep(100);
+    for (let i = 0; i < process.argv.length; i++) {
+        const arg = process.argv[i];
+        if ((arg === '-f' || arg === '--format') && process.argv[i + 1]) {
+            return process.argv[i + 1].toLowerCase();
         }
-      }
-      results[name] = found || null;
+        if (arg.startsWith('--format=')) {
+            return arg.slice('--format='.length).toLowerCase();
+        }
+        if (arg.startsWith('-f=')) {
+            return arg.slice('-f='.length).toLowerCase();
+        }
     }
-    return results;
-  })()`);
-    const unresolved = [];
-    for (const name of names) {
-        const id = resolved?.[name];
-        if (id)
-            ids.add(id);
-        else
-            unresolved.push(name);
+    const outputFile = kwargs?.output || kwargs?.file;
+    if (outputFile) {
+        const ext = path.extname(outputFile).toLowerCase();
+        if (ext === '.yml' || ext === '.yaml') return 'yaml';
+        if (ext === '.json') return 'json';
+        if (ext === '.jsonl') return 'jsonl';
+        if (ext === '.csv') return 'csv';
+        if (ext === '.md') return 'markdown';
     }
-    if (unresolved.length) {
-        throw new ArgumentError(`Could not resolve LinkedIn company filter: ${unresolved.join(', ')}`);
+    if (!process.stdout.isTTY) {
+        return 'yaml';
     }
-    return [...ids];
-}
-function formatHiringTeam(raw) {
-    if (!raw) return null;
-    const name = normalizeWhitespace(raw.name);
-    const title = normalizeWhitespace(raw.title);
-    const decodedUrl = decodeLinkedinRedirect(normalizeWhitespace(raw.profile_url));
-    const profile_url = decodedUrl ? decodedUrl.split('?')[0].split('#')[0] : '';
-    if (!name && !profile_url) return null;
-    const team = {};
-    team.name = name || null;
-    team.title = title || null;
-    team.profile_url = profile_url || null;
-    team.toString = function() {
-        if (this.name && this.title) return `${this.name} (${this.title})`;
-        return this.name || this.profile_url || '';
-    };
-    return team;
+    return 'table';
 }
 
-function parseHiringTeamDom(root) {
-    if (!root) return null;
-    const clean = (s) => String(s || '').replace(/[\u00a0\u202f]+/g, ' ').replace(/\s+/g, ' ').trim();
-    const isHiringTeamTitle = (str) => /meet the hiring team/i.test(clean(str));
+function resolveOutputFile(kwargs) {
+    if (kwargs?.output) return String(kwargs.output);
+    if (kwargs?.file) return String(kwargs.file);
+    for (let i = 0; i < process.argv.length; i++) {
+        const arg = process.argv[i];
+        if ((arg === '-o' || arg === '--output' || arg === '--file') && process.argv[i + 1]) {
+            return process.argv[i + 1];
+        }
+        if (arg.startsWith('--output=')) return arg.slice('--output='.length);
+        if (arg.startsWith('--file=')) return arg.slice('--file='.length);
+        if (arg.startsWith('-o=')) return arg.slice('-o='.length);
+    }
+    return null;
+}
 
-    let container = root.querySelector?.('[title*="Meet the hiring team" i], [aria-label*="Meet the hiring team" i], [role="alert"][title*="Meet the hiring team" i]');
+class StreamWriter {
+    constructor(format, outputFilePath) {
+        this.format = format;
+        this.outputFilePath = outputFilePath;
+        this.writeToStdout = format !== 'table';
+        this.count = 0;
+        this.closed = false;
 
-    if (!container) {
-        const candidates = Array.from(root.querySelectorAll?.('h1, h2, h3, h4, h5, div, section, p, span') || [])
-            .filter(el => isHiringTeamTitle(el.getAttribute('title') || '') ||
-                          isHiringTeamTitle(el.getAttribute('aria-label') || '') ||
-                          (isHiringTeamTitle(el.innerText || el.textContent || '') && clean(el.innerText || el.textContent || '').length < 60));
+        this.sigintHandler = () => {
+            this.close();
+            process.exit(130);
+        };
+        process.once('SIGINT', this.sigintHandler);
+        process.once('SIGTERM', this.sigintHandler);
 
-        for (const cand of candidates) {
-            const parent = cand.closest?.('[role="alert"], section, div.artdeco-card, div');
-            if (parent && parent.querySelector?.('a[href*="/in/"]')) {
-                container = parent;
-                break;
+        if (this.outputFilePath) {
+            try {
+                const dir = path.dirname(this.outputFilePath);
+                if (dir && !fs.existsSync(dir)) {
+                    fs.mkdirSync(dir, { recursive: true });
+                }
+            } catch {}
+        }
+    }
+
+    writeRow(row) {
+        let text = '';
+        if (this.format === 'yaml' || this.format === 'yml') {
+            text = yaml.dump([row], { sortKeys: false, lineWidth: 120, noRefs: true });
+        } else if (this.format === 'json') {
+            const prefix = this.count === 0 ? '[\n' : ',\n';
+            const indented = JSON.stringify(row, null, 2).replace(/^/gm, '  ');
+            text = prefix + indented;
+        } else if (this.format === 'jsonl') {
+            text = JSON.stringify(row) + '\n';
+        } else if (this.format === 'csv') {
+            const keys = Object.keys(row);
+            if (this.count === 0) {
+                text += keys.join(',') + '\n';
             }
-            if (cand.parentElement && cand.parentElement.querySelector?.('a[href*="/in/"]')) {
-                container = cand.parentElement;
-                break;
+            const line = keys.map(k => {
+                const v = String(row[k] ?? '');
+                return v.includes(',') || v.includes('"') || v.includes('\n') || v.includes('\r')
+                    ? `"${v.replace(/"/g, '""')}"` : v;
+            }).join(',');
+            text += line + '\n';
+        } else if (this.format === 'md' || this.format === 'markdown') {
+            const keys = Object.keys(row);
+            if (this.count === 0) {
+                text += '| ' + keys.join(' | ') + ' |\n';
+                text += '| ' + keys.map(() => '---').join(' | ') + ' |\n';
+            }
+            text += '| ' + keys.map(k => String(row[k] ?? '').replace(/\|/g, '\\|').replace(/\r\n?|\n/g, '<br>')).join(' | ') + ' |\n';
+        } else {
+            // plain
+            const entries = Object.entries(row).filter(([, v]) => v !== undefined && v !== null && String(v) !== '');
+            text = entries.map(([k, v]) => `${k}: ${v}`).join('\n') + '\n\n';
+        }
+
+        this.count++;
+
+        if (this.outputFilePath) {
+            try {
+                fs.appendFileSync(this.outputFilePath, text, 'utf8');
+            } catch (err) {
+                console.error(`[opencli:linkedin] Failed to write to file ${this.outputFilePath}: ${err.message}`);
+            }
+        }
+        if (this.writeToStdout) {
+            process.stdout.write(text);
+        }
+    }
+
+    close() {
+        if (this.closed) return;
+        this.closed = true;
+        try { process.removeListener('SIGINT', this.sigintHandler); } catch {}
+        try { process.removeListener('SIGTERM', this.sigintHandler); } catch {}
+        if (this.format === 'json') {
+            const closeText = this.count === 0 ? '[]\n' : '\n]\n';
+            if (this.outputFilePath) {
+                try { fs.appendFileSync(this.outputFilePath, closeText, 'utf8'); } catch {}
+            }
+            if (this.writeToStdout) {
+                process.stdout.write(closeText);
             }
         }
     }
-
-    if (!container) {
-        const allWithLink = Array.from(root.querySelectorAll?.('section, div, [role="alert"]') || [])
-            .filter(el => isHiringTeamTitle(el.innerText || el.textContent || '') && el.querySelector?.('a[href*="/in/"]'));
-        if (allWithLink.length > 0) {
-            allWithLink.sort((a, b) => clean(a.innerText || a.textContent || '').length - clean(b.innerText || b.textContent || '').length);
-            container = allWithLink[0];
-        }
-    }
-
-    if (!container) return null;
-
-    const profileLink = container.querySelector?.('a[href*="/in/"]');
-    if (!profileLink) return null;
-
-    let profileUrl = profileLink.href || profileLink.getAttribute('href') || '';
-    if (profileUrl && !profileUrl.startsWith('http')) {
-        const origin = (typeof window !== 'undefined' && window.location?.origin) ? window.location.origin : 'https://www.linkedin.com';
-        try {
-            profileUrl = new URL(profileUrl, origin).toString();
-        } catch {
-            profileUrl = 'https://www.linkedin.com' + (profileUrl.startsWith('/') ? '' : '/') + profileUrl;
-        }
-    }
-    profileUrl = profileUrl.split('?')[0].split('#')[0];
-
-    let name = clean(profileLink.innerText || profileLink.textContent || '');
-    if (!name) {
-        const nameEl = container.querySelector?.('strong, h3, h4, [class*="name"]');
-        name = clean(nameEl?.innerText || nameEl?.textContent || '');
-    }
-    name = name.replace(/\s*·\s*(?:1st|2nd|3rd\+?|you)\s*$/i, '')
-               .replace(/\s*\((?:he\/him|she\/her|they\/them)\)/i, '')
-               .trim();
-
-    const headlineEl = container.querySelector?.('[class*="headline"], [class*="subtitle"], [class*="occupation"], [class*="description"]');
-    let title = headlineEl ? clean(headlineEl.innerText || headlineEl.textContent || '') : '';
-    if (!title || isHiringTeamTitle(title) || title === name) {
-        const textNodes = Array.from(container.querySelectorAll?.('div, p, span') || [])
-            .map(el => clean(el.innerText || el.textContent || ''))
-            .filter(t => t &&
-                         !isHiringTeamTitle(t) &&
-                         t !== name &&
-                         !t.startsWith(name) &&
-                         !/^(?:1st|2nd|3rd\+?|connect|message|follow|job poster|hiring team)$/i.test(t));
-        title = textNodes[0] || '';
-    }
-
-    if (!name && !profileUrl) return null;
-
-    const team = {};
-    team.name = name || null;
-    team.title = title || null;
-    team.profile_url = profileUrl || null;
-    return team;
 }
 
 // ── DOM extraction fallback (for semantic search & streaming cards) ───
@@ -457,21 +350,21 @@ async function extractJobCardsFromDom(page) {
     return unique;
 }
 
-// ── DOM extraction with cursor / offset pagination ────────────────────
-async function fetchJobCardsFromDom(page, input) {
+// ── Offset / Cursor pagination for DOM extraction ─────────────────────
+async function fetchJobCardsFromDom(page, input, options = {}) {
     const PAGE_SIZE = 25;
     const allJobs = [];
     const seenUrls = new Set();
     let currentStart = input.start;
     const referralSearchId = input.referralSearchId || generateReferralSearchId();
-    let pagesFetched = 0;
+
     const maxPages = Math.ceil(input.limit / PAGE_SIZE) + 2;
+    let pagesFetched = 0;
 
     while (allJobs.length < input.limit && pagesFetched < maxPages) {
         if (pagesFetched > 0) {
             const targetUrl = buildJobSearchUrl({
                 keywords: input.keywords,
-                location: input.location,
                 start: currentStart,
                 referralSearchId,
             });
@@ -501,7 +394,15 @@ async function fetchJobCardsFromDom(page, input) {
 
         // When details are requested, click the entry div from top to bottom of the current page before going to next page
         const processedBatch = input.includeDetails
-            ? await enrichJobDetails(page, currentBatch)
+            ? await enrichJobDetails(page, currentBatch, {
+                onDetailFetched: (job, batchIndex) => {
+                    const rankedJob = {
+                        rank: input.start + allJobs.length + batchIndex + 1,
+                        ...job,
+                    };
+                    options?.onDetailFetched?.(rankedJob);
+                }
+            })
             : currentBatch;
 
         let newJobsAdded = 0;
@@ -534,7 +435,7 @@ async function fetchJobCardsFromDom(page, input) {
 }
 
 // ── Voyager API fetch (runs inside page context for cookie access) ────
-async function fetchJobCards(page, input) {
+async function fetchJobCards(page, input, options = {}) {
     const MAX_BATCH = 25;
     const allJobs = [];
     let offset = input.start;
@@ -542,7 +443,7 @@ async function fetchJobCards(page, input) {
     const cookies = await page.getCookies?.({ url: 'https://www.linkedin.com' });
     const jsession = cookies?.find((c) => c.name === 'JSESSIONID')?.value;
     if (!jsession) {
-        return await fetchJobCardsFromDom(page, input);
+        return await fetchJobCardsFromDom(page, input, options);
     }
     const csrf = jsession.replace(/^"|"$/g, '');
     while (allJobs.length < input.limit) {
@@ -610,7 +511,7 @@ async function fetchJobCards(page, input) {
     }
 
     if (allJobs.length === 0) {
-        return await fetchJobCardsFromDom(page, input);
+        return await fetchJobCardsFromDom(page, input, options);
     }
 
     return allJobs.slice(0, input.limit).map((item, index) => ({
@@ -618,31 +519,20 @@ async function fetchJobCards(page, input) {
         ...item,
     }));
 }
+
 // ── Job detail enrichment (--details flag) ────────────────────────────
-//
-// Per-row failures should NOT abort the whole list (--details enriches N rows;
-// partial failure is expected). But silent empty-string fields hide the failure
-// from callers — previously `catch {}` and the `if (!job.url)` early-return
-// both produced indistinguishable `description: '', apply_url: ''` payloads,
-// so users could not tell "fetch failed" from "upstream had no description".
-//
-// To extract details efficiently without opening new tabs or navigating away,
-// `enrichJobDetails` clicks each job card in the current search page DOM
-// so LinkedIn loads the details into the right-side pane. If the card cannot
-// be found on the current page or in-page loading fails to yield a description,
-// it gracefully falls back to `page.goto(job.url)`.
 
 async function clickJobCardInDom(page, job, index = 0) {
-    const jobId = String(job.url || '').match(/\/jobs\/view\/(\d+)/)?.[1] || '';
+    const jobId = (job.url || '').match(/\/jobs\/view\/(\d+)/)?.[1] || '';
     const clicked = await page.evaluate(`((targetJobId, targetUrl, targetTitle, targetIndex) => {
         const norm = (v) => (v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const cleanTitle = norm(targetTitle);
+        const cleanTitle = norm(targetTitle || '');
 
         function clickElement(el) {
             if (!el) return false;
             try { el.scrollIntoView({ behavior: 'auto', block: 'center' }); } catch {}
             try { el.focus?.(); } catch {}
-            const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
+            const mouseOpts = { bubbles: true, cancelable: true, view: window, buttons: 1, detail: 1 };
             try {
                 if (typeof PointerEvent !== 'undefined') {
                     el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
@@ -699,7 +589,6 @@ async function clickJobCardInDom(page, job, index = 0) {
             const allJobLinks = Array.from(document.querySelectorAll('a[href*="/jobs/view/"]'));
             const cardSet = new Set();
             for (const link of allJobLinks) {
-                // Ascend to find the list-item container for this link
                 let cur = link.parentElement;
                 let candidate = null;
                 while (cur && cur !== document.body && !cur.matches('#workspace, main, section')) {
@@ -733,8 +622,7 @@ async function clickJobCardInDom(page, job, index = 0) {
             const el = document.querySelector(
                 '[componentkey*="' + targetJobId + '"], ' +
                 '[data-job-id="' + targetJobId + '"], ' +
-                '[data-occludable-job-id="' + targetJobId + '"], ' +
-                'a[href*="/jobs/view/' + targetJobId + '"]'
+                '[data-occludable-job-id="' + targetJobId + '"]'
             );
             if (el) {
                 card = el.closest('[componentkey^="job-card-component-ref-"], [data-occludable-job-id], [data-job-id], .job-card-container, li.jobs-search-results__list-item, li') || el.parentElement;
@@ -967,16 +855,14 @@ async function extractJobDetailsFromDom(page) {
           .map(a => ({ href: a.href || '', text: norm(a.textContent || ''), aria: norm(a.getAttribute('aria-label') || '') }))
           .find(a => /apply/i.test(a.text) || /apply/i.test(a.aria));
 
-        ${parseHiringTeamDom.toString()}
-        const hiringTeam = parseHiringTeamDom(rightPane) || parseHiringTeamDom(document);
-
-        return { description, applyUrl: applyLink?.href || '', hiringTeam };
+        return { description, applyUrl: applyLink?.href || '' };
     })()`);
 
     return detail;
 }
 
-async function enrichJobDetails(page, jobs) {
+async function enrichJobDetails(page, jobs, options = {}) {
+    const onDetailFetched = typeof options === 'function' ? options : options?.onDetailFetched;
     const enriched = [];
     for (let i = 0; i < jobs.length; i++) {
         const job = jobs[i];
@@ -984,7 +870,13 @@ async function enrichJobDetails(page, jobs) {
         if (!job.url) {
             const reason = 'no url';
             console.error(`[opencli:linkedin] Skipping detail for "${job.title}": ${reason}`);
-            enriched.push({ ...job, description: null, apply_url: null, hiring_team: null, detail_error: reason });
+            const enrichedJob = { ...job, description: null, apply_url: null, detail_error: reason };
+            enriched.push(enrichedJob);
+            if (onDetailFetched) {
+                try { onDetailFetched(enrichedJob, i); } catch (err) {
+                    console.error(`[opencli:linkedin] Error in onDetailFetched: ${err.message}`);
+                }
+            }
             continue;
         }
         try {
@@ -1015,27 +907,38 @@ async function enrichJobDetails(page, jobs) {
 
             const description = normalizeWhitespace(detail?.description);
             const apply_url = decodeLinkedinRedirect(String(detail?.applyUrl ?? ''));
-            const hiring_team = formatHiringTeam(detail?.hiringTeam);
 
             const detail_error = description ? null : 'missing description';
-            enriched.push({
+            const enrichedJob = {
                 ...job,
                 description: description || null,
                 apply_url: apply_url || null,
-                hiring_team,
                 detail_error,
-            });
+            };
+            enriched.push(enrichedJob);
+            if (onDetailFetched) {
+                try { onDetailFetched(enrichedJob, i); } catch (err) {
+                    console.error(`[opencli:linkedin] Error in onDetailFetched: ${err.message}`);
+                }
+            }
         }
         catch (err) {
             if (err instanceof AuthRequiredError)
                 throw err;
             const reason = `fetch failed: ${err?.message || err}`;
             console.error(`[opencli:linkedin] Detail fetch failed for ${job.url}: ${reason}`);
-            enriched.push({ ...job, description: null, apply_url: null, hiring_team: null, detail_error: reason });
+            const enrichedJob = { ...job, description: null, apply_url: null, detail_error: reason };
+            enriched.push(enrichedJob);
+            if (onDetailFetched) {
+                try { onDetailFetched(enrichedJob, i); } catch (cbErr) {
+                    console.error(`[opencli:linkedin] Error in onDetailFetched: ${cbErr.message}`);
+                }
+            }
         }
     }
     return enriched;
 }
+
 // ── CLI registration ──────────────────────────────────────────────────
 cli({
     site: 'linkedin',
@@ -1047,58 +950,87 @@ cli({
     browser: true,
     args: [
         { name: 'query', type: 'string', required: true, positional: true, help: 'Job search keywords' },
-        { name: 'location', type: 'string', required: false, help: 'Location text such as San Francisco Bay Area' },
         { name: 'limit', type: 'int', default: 10, help: 'Number of jobs to return (max 100)' },
         { name: 'start', type: 'int', default: 0, help: 'Result offset for pagination' },
-        { name: 'details', type: 'bool', default: false, help: 'Include full job description, apply URL, and hiring team (slower)' },
-        { name: 'company', type: 'string', required: false, help: 'Comma-separated company names or LinkedIn company IDs' },
-        { name: 'experience-level', type: 'string', required: false, help: 'Comma-separated: internship, entry, associate, mid-senior, director, executive' },
-        { name: 'job-type', type: 'string', required: false, help: 'Comma-separated: full-time, part-time, contract, temporary, volunteer, internship, other' },
-        { name: 'date-posted', type: 'string', required: false, help: 'One of: any, month, week, 24h' },
-        { name: 'remote', type: 'string', required: false, help: 'Comma-separated: on-site, hybrid, remote' },
+        { name: 'details', type: 'bool', default: false, help: 'Include full job description and apply URL (slower)' },
+        { name: 'output', type: 'string', required: false, help: 'Optional file path to append results to directly' },
     ],
     columns: ['rank', 'title', 'company', 'location', 'listed', 'salary', 'url'],
     func: async (page, kwargs) => {
         const limit = parseIntegerArg(kwargs.limit, '--limit', 10, MIN_LIMIT, MAX_LIMIT);
         const start = parseIntegerArg(kwargs.start, '--start', 0, MIN_START);
         const includeDetails = Boolean(kwargs.details);
-        const location = (kwargs.location ?? '').trim();
         const keywords = String(kwargs.query ?? '').trim();
         if (!keywords)
             throw new ArgumentError('query is required');
+
+        const format = resolveOutputFormat(kwargs);
+        const outputFile = resolveOutputFile(kwargs);
+        const streamWriter = (includeDetails && (format !== 'table' || outputFile))
+            ? new StreamWriter(format, outputFile)
+            : null;
+
         const referralSearchId = generateReferralSearchId();
-        const searchUrl = buildJobSearchUrl({ keywords, location, start, referralSearchId });
+        const searchUrl = buildJobSearchUrl({ keywords, start, referralSearchId });
         await page.goto(searchUrl);
         await assertLinkedInAuthenticated(page, 'LinkedIn search');
         await page.wait({ text: 'Jobs', timeout: 10 });
-        const companyIds = await resolveCompanyIds(page, kwargs.company);
+
         const input = {
             keywords,
-            location,
             limit,
             start,
             includeDetails,
             referralSearchId,
-            companyIds,
-            experienceLevels: mapFilterValues(kwargs['experience-level'], EXPERIENCE_LEVELS, 'experience_level'),
-            jobTypes: mapFilterValues(kwargs['job-type'], JOB_TYPES, 'job_type'),
-            datePostedValues: mapFilterValues(kwargs['date-posted'], DATE_POSTED, 'date_posted'),
-            remoteTypes: mapFilterValues(kwargs.remote, REMOTE_TYPES, 'remote'),
         };
-        const data = await fetchJobCards(page, input);
-        if (!includeDetails)
-            return data;
-        if (data.length > 0 && ('description' in data[0] || 'hiring_team' in data[0])) {
-            return data;
+
+        const options = {
+            onDetailFetched: (rankedJob) => {
+                if (streamWriter) {
+                    streamWriter.writeRow(rankedJob);
+                }
+            },
+        };
+
+        try {
+            const data = await fetchJobCards(page, input, options);
+            if (!includeDetails)
+                return data;
+            if (data.length > 0 && 'description' in data[0]) {
+                if (streamWriter) {
+                    streamWriter.close();
+                    return streamWriter.writeToStdout ? null : data;
+                }
+                return data;
+            }
+
+            const enriched = await enrichJobDetails(page, data, {
+                onDetailFetched: (job, index) => {
+                    const rankedJob = {
+                        rank: input.start + index + 1,
+                        ...job,
+                    };
+                    if (streamWriter) {
+                        streamWriter.writeRow(rankedJob);
+                    }
+                },
+            });
+
+            if (streamWriter) {
+                streamWriter.close();
+                return streamWriter.writeToStdout ? null : enriched;
+            }
+            return enriched;
+        } finally {
+            if (streamWriter) {
+                streamWriter.close();
+            }
         }
-        return enrichJobDetails(page, data);
     },
 });
 
 export const __test__ = {
-    parseCsvArg,
     parseIntegerArg,
-    mapFilterValues,
     decodeLinkedinRedirect,
     looksLinkedInAuthWallText,
     assertLinkedInAuthenticated,
@@ -1108,12 +1040,9 @@ export const __test__ = {
     extractJobCardsFromDom,
     fetchJobCardsFromDom,
     fetchJobCards,
-    formatHiringTeam,
-    parseHiringTeamDom,
     clickJobCardInDom,
     extractJobDetailsFromDom,
-    EXPERIENCE_LEVELS,
-    JOB_TYPES,
-    DATE_POSTED,
-    REMOTE_TYPES,
+    StreamWriter,
+    resolveOutputFormat,
+    resolveOutputFile,
 };

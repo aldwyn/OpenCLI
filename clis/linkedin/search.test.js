@@ -5,9 +5,7 @@ import { ArgumentError, AuthRequiredError } from '@jackwener/opencli/errors';
 import { __test__ } from './search.js';
 
 const {
-    parseCsvArg,
     parseIntegerArg,
-    mapFilterValues,
     decodeLinkedinRedirect,
     looksLinkedInAuthWallText,
     enrichJobDetails,
@@ -16,47 +14,14 @@ const {
     extractJobCardsFromDom,
     fetchJobCardsFromDom,
     fetchJobCards,
-    formatHiringTeam,
-    parseHiringTeamDom,
     clickJobCardInDom,
     extractJobDetailsFromDom,
-    EXPERIENCE_LEVELS,
-    JOB_TYPES,
-    DATE_POSTED,
-    REMOTE_TYPES,
+    StreamWriter,
+    resolveOutputFormat,
+    resolveOutputFile,
 } = __test__;
 
 const getSearchCommand = () => getRegistry().get('linkedin/search');
-
-describe('linkedin parseCsvArg', () => {
-    it('returns empty array for empty / null / undefined', () => {
-        expect(parseCsvArg(undefined)).toEqual([]);
-        expect(parseCsvArg(null)).toEqual([]);
-        expect(parseCsvArg('')).toEqual([]);
-    });
-
-    it('splits and trims comma-separated values', () => {
-        expect(parseCsvArg('full-time, contract')).toEqual(['full-time', 'contract']);
-        expect(parseCsvArg(' a , b , , c ')).toEqual(['a', 'b', 'c']);
-    });
-});
-
-describe('linkedin mapFilterValues', () => {
-    it('maps known values to upstream codes and dedupes', () => {
-        expect(mapFilterValues('full-time, contract, full', JOB_TYPES, 'job_type')).toEqual(['F', 'C']);
-        expect(mapFilterValues('remote, hybrid', REMOTE_TYPES, 'remote')).toEqual(['2', '3']);
-    });
-
-    it('throws ArgumentError on unknown filter values (no silent drop)', () => {
-        expect(() => mapFilterValues('martian', JOB_TYPES, 'job_type')).toThrow(ArgumentError);
-        expect(() => mapFilterValues('full-time, ufo', JOB_TYPES, 'job_type')).toThrow(ArgumentError);
-    });
-
-    it('returns empty array for empty input', () => {
-        expect(mapFilterValues('', EXPERIENCE_LEVELS, 'experience_level')).toEqual([]);
-        expect(mapFilterValues(undefined, DATE_POSTED, 'date_posted')).toEqual([]);
-    });
-});
 
 describe('linkedin argument validation', () => {
     it('rejects --limit outside 1..100 instead of silently clamping', () => {
@@ -278,15 +243,14 @@ describe('linkedin search URL builder (semantic search)', () => {
         };
 
         try {
-            await command.func(page, { query: 'aws devops', location: 'Australia', limit: 1 });
+            await command.func(page, { query: 'aws devops in Australia', limit: 1 });
         } catch {
             // Further API calls in mock page may throw after navigation
         }
 
         expect(page.goto).toHaveBeenCalledTimes(1);
         expect(navigatedUrl).toContain('https://www.linkedin.com/jobs/search-results/?');
-        expect(navigatedUrl).toContain('keywords=aws+devops');
-        expect(navigatedUrl).toContain('location=Australia');
+        expect(navigatedUrl).toContain('keywords=aws+devops+in+Australia');
         expect(navigatedUrl).toContain('origin=JOB_SEARCH_PAGE_JOB_FILTER');
         expect(navigatedUrl).toContain('referralSearchId=');
         expect(navigatedUrl).not.toContain('/jobs/search/?');
@@ -632,98 +596,94 @@ describe('linkedin fetchJobCardsFromDom (cursor / offset pagination & limit)', (
     });
 });
 
-describe('linkedin hiring team extraction ("Meet the hiring team")', () => {
-    it('extracts recruiter details from alert div with title="Meet the hiring team"', () => {
-        const dom = new JSDOM(`
-            <div role="alert" title="Meet the hiring team">
-                <h2>Meet the hiring team</h2>
-                <div class="hirer-profile">
-                    <a href="https://www.linkedin.com/in/sarah-recruiter?miniProfileUrn=urn%3Ali%3Afsd_profile%3A123">
-                        Sarah Jenkins · 1st
-                    </a>
-                    <div class="hirer-headline">Senior Technical Recruiter at AWS Cloud Solutions</div>
-                </div>
-            </div>
-        `);
-
-        const team = parseHiringTeamDom(dom.window.document);
-        expect(team).toEqual({
-            name: 'Sarah Jenkins',
-            title: 'Senior Technical Recruiter at AWS Cloud Solutions',
-            profile_url: 'https://www.linkedin.com/in/sarah-recruiter',
+describe('linkedin immediate streaming to stdout and file on detail fetch', () => {
+    it('formats and streams each detail row as valid YAML when format is yaml', () => {
+        let stdoutText = '';
+        const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((text) => {
+            stdoutText += text;
+            return true;
         });
+
+        const writer = new StreamWriter('yaml', null);
+        writer.writeRow({ rank: 1, title: 'DevOps Lead', description: 'AWS experience required' });
+        writer.writeRow({ rank: 2, title: 'Site Reliability Engineer', description: 'Kubernetes expert' });
+        writer.close();
+
+        writeSpy.mockRestore();
+
+        expect(stdoutText).toContain('- rank: 1\n  title: DevOps Lead\n  description: AWS experience required\n');
+        expect(stdoutText).toContain('- rank: 2\n  title: Site Reliability Engineer\n  description: Kubernetes expert\n');
     });
 
-    it('extracts recruiter details from card with heading "Meet the hiring team"', () => {
-        const dom = new JSDOM(`
-            <div class="artdeco-card">
-                <h3>Meet the hiring team</h3>
-                <a href="/in/marcus-vance">
-                    <strong>Marcus Vance</strong>
-                </a>
-                <p class="jobs-poster__headline">Lead Talent Acquisition (he/him)</p>
-            </div>
-        `);
-
-        const team = parseHiringTeamDom(dom.window.document);
-        expect(team).toMatchObject({
-            name: 'Marcus Vance',
-            title: 'Lead Talent Acquisition (he/him)',
-            profile_url: 'https://www.linkedin.com/in/marcus-vance',
+    it('formats and streams each detail row as valid JSON array when format is json', () => {
+        let stdoutText = '';
+        const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((text) => {
+            stdoutText += text;
+            return true;
         });
+
+        const writer = new StreamWriter('json', null);
+        writer.writeRow({ rank: 1, title: 'DevOps Lead' });
+        writer.writeRow({ rank: 2, title: 'Site Reliability Engineer' });
+        writer.close();
+
+        writeSpy.mockRestore();
+
+        expect(stdoutText.startsWith('[\n')).toBe(true);
+        expect(stdoutText.trim().endsWith(']')).toBe(true);
+        const parsed = JSON.parse(stdoutText);
+        expect(parsed).toEqual([
+            { rank: 1, title: 'DevOps Lead' },
+            { rank: 2, title: 'Site Reliability Engineer' },
+        ]);
     });
 
-    it('cleans connection degrees and pronouns from recruiter name', () => {
-        const dom = new JSDOM(`
-            <div title="Meet the hiring team">
-                <a href="https://www.linkedin.com/in/jane-doe">Jane Doe (she/her) · 2nd</a>
-                <div>Head of Engineering</div>
-            </div>
-        `);
+    it('formats and streams each detail row as CSV with header on first row', () => {
+        let stdoutText = '';
+        const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((text) => {
+            stdoutText += text;
+            return true;
+        });
 
-        const team = parseHiringTeamDom(dom.window.document);
-        expect(team?.name).toBe('Jane Doe');
-        expect(team?.title).toBe('Head of Engineering');
+        const writer = new StreamWriter('csv', null);
+        writer.writeRow({ rank: 1, title: 'DevOps Lead', company: 'Acme Corp' });
+        writer.writeRow({ rank: 2, title: 'SRE', company: 'Beta, Inc.' });
+        writer.close();
+
+        writeSpy.mockRestore();
+
+        const lines = stdoutText.trim().split('\n');
+        expect(lines[0]).toBe('rank,title,company');
+        expect(lines[1]).toBe('1,DevOps Lead,Acme Corp');
+        expect(lines[2]).toBe('2,SRE,"Beta, Inc."');
     });
 
-    it('returns null when no hiring team container is present', () => {
-        const dom = new JSDOM(`
-            <div class="job-view">
-                <h2>About the job</h2>
-                <p>We are looking for a DevOps engineer.</p>
-            </div>
-        `);
+    it('does not stream to stdout when format is table', () => {
+        let stdoutCalled = false;
+        const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => {
+            stdoutCalled = true;
+            return true;
+        });
 
-        expect(parseHiringTeamDom(dom.window.document)).toBeNull();
+        const writer = new StreamWriter('table', null);
+        writer.writeRow({ rank: 1, title: 'DevOps Lead' });
+        writer.close();
+
+        writeSpy.mockRestore();
+
+        expect(stdoutCalled).toBe(false);
     });
 
-    it('formatHiringTeam handles null, strings, and custom toString formatting', () => {
-        expect(formatHiringTeam(null)).toBeNull();
-        expect(formatHiringTeam(undefined)).toBeNull();
-        expect(formatHiringTeam({})).toBeNull();
-
-        const formatted = formatHiringTeam({
-            name: 'Alex Rivera',
-            title: 'Talent Sourcer',
-            profile_url: 'https://www.linkedin.com/in/alex-rivera?trk=jobs',
-        });
-        expect(formatted).toMatchObject({
-            name: 'Alex Rivera',
-            title: 'Talent Sourcer',
-            profile_url: 'https://www.linkedin.com/in/alex-rivera',
-        });
-        expect(String(formatted)).toBe('Alex Rivera (Talent Sourcer)');
-        expect(JSON.parse(JSON.stringify(formatted))).toEqual({
-            name: 'Alex Rivera',
-            title: 'Talent Sourcer',
-            profile_url: 'https://www.linkedin.com/in/alex-rivera',
-        });
+    it('resolves format from kwargs, CLI flags, file extension, and fallback', () => {
+        expect(resolveOutputFormat({ format: 'json' })).toBe('json');
+        expect(resolveOutputFormat({ output: 'jobs.yml' })).toBe('yaml');
+        expect(resolveOutputFormat({ file: 'jobs.json' })).toBe('json');
+        expect(resolveOutputFile({ output: 'my-jobs.yml' })).toBe('my-jobs.yml');
+        expect(resolveOutputFile({ file: 'my-jobs.json' })).toBe('my-jobs.json');
     });
-});
 
-describe('linkedin enrichJobDetails with hiring_team', () => {
-    function makeDetailFakePage(detail) {
-        return {
+    it('invokes onDetailFetched callback immediately for each enriched job without hiring_team', async () => {
+        const page = {
             goto: vi.fn().mockResolvedValue(undefined),
             wait: vi.fn().mockResolvedValue(undefined),
             evaluate: vi.fn(async (code) => {
@@ -734,50 +694,32 @@ describe('linkedin enrichJobDetails with hiring_team', () => {
                     return false;
                 }
                 if (typeof code === 'string' && code.includes('About the job')) {
-                    return detail;
+                    return {
+                        description: 'Great job description without hiring team',
+                        applyUrl: 'https://example.com/apply',
+                    };
                 }
                 return undefined;
             }),
         };
-    }
 
-    it('populates hiring_team when job detail page contains hiring team', async () => {
-        const page = makeDetailFakePage({
-            description: 'Great job description',
-            applyUrl: 'https://example.com/apply',
-            hiringTeam: {
-                name: 'Emma Watson',
-                title: 'Technical Recruiter',
-                profile_url: 'https://www.linkedin.com/in/emma-watson',
+        const fetchedStream = [];
+        const enriched = await enrichJobDetails(page, [
+            { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
+            { rank: 2, title: 'Cloud Architect', company: 'AWSCo', url: 'https://www.linkedin.com/jobs/view/888' },
+        ], {
+            onDetailFetched: (job) => {
+                fetchedStream.push(job);
             },
         });
 
-        const [enriched] = await enrichJobDetails(page, [
-            { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
-        ]);
-
-        expect(enriched.description).toBe('Great job description');
-        expect(enriched.apply_url).toBe('https://example.com/apply');
-        expect(enriched.hiring_team).toMatchObject({
-            name: 'Emma Watson',
-            title: 'Technical Recruiter',
-            profile_url: 'https://www.linkedin.com/in/emma-watson',
-        });
-        expect(enriched.detail_error).toBeNull();
-    });
-
-    it('sets hiring_team: null when detail page does not have hiring team', async () => {
-        const page = makeDetailFakePage({
-            description: 'Great job description',
-            applyUrl: '',
-            hiringTeam: null,
-        });
-
-        const [enriched] = await enrichJobDetails(page, [
-            { rank: 1, title: 'DevOps Lead', company: 'CloudCo', url: 'https://www.linkedin.com/jobs/view/999' },
-        ]);
-
-        expect(enriched.hiring_team).toBeNull();
+        expect(fetchedStream).toHaveLength(2);
+        expect(fetchedStream[0].title).toBe('DevOps Lead');
+        expect(fetchedStream[0].description).toBe('Great job description without hiring team');
+        expect(fetchedStream[0]).not.toHaveProperty('hiring_team');
+        expect(fetchedStream[1].title).toBe('Cloud Architect');
+        expect(fetchedStream[1]).not.toHaveProperty('hiring_team');
+        expect(enriched).toHaveLength(2);
     });
 });
 
@@ -844,10 +786,7 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(targetClicked).toBe(true);
         expect(enriched.description).toContain('Cloud and DevOps Engineer details in-place.');
         expect(enriched.apply_url).toBe('https://example.com/apply/inplace');
-        expect(enriched.hiring_team).toMatchObject({
-            name: 'Jane Manager',
-            title: 'Engineering Lead',
-        });
+        expect(enriched).not.toHaveProperty('hiring_team');
         expect(enriched.detail_error).toBeNull();
     });
 
@@ -903,11 +842,7 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(linkClicked).toBe(false);
         expect(enriched.description).toContain('Senior AWS Cloud Engineer');
         expect(enriched.apply_url).toBe('https://example.com/apply/aws-cloud');
-        expect(enriched.hiring_team).toMatchObject({
-            name: 'Sarah Recruiter',
-            title: 'Talent Partner @ CloudCo',
-            profile_url: 'https://www.linkedin.com/in/sarah-recruiter',
-        });
+        expect(enriched).not.toHaveProperty('hiring_team');
         expect(enriched.detail_error).toBeNull();
     });
 
@@ -1113,7 +1048,7 @@ describe('linkedin in-page job card clicking and details extraction', () => {
         expect(result).toBeDefined();
         expect(result.description).toBe('');
         expect(result.applyUrl).toBe('');
-        expect(result.hiringTeam).toBeNull();
+        expect(result.hiringTeam).toBeUndefined();
     });
 });
 
